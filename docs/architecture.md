@@ -248,21 +248,35 @@ fixed:
 - **BT.601 at studio swing**, converted from the framebuffer's `B, G, R, X` and
   declared in the keyframe header, so a decoder converts back with the same
   matrix. The client's pixel format does not apply.
-- **A quantizer that follows the link.** The 1–100 dial maps onto VP9's 8–63,
-  finest last, as remotex's dial does; rate control is pinned to wherever the
-  dial is, with no bitrate, no adaptive quantization and no dropped frames.
-  A session starts at `vp9_quality` (90 by default, for the LAN wlshare mostly runs on), which is a ceiling it
-  never goes above, and walks down to `vp9_quality_min` (20, or `vp9_quality`
-  if that is lower) while the client is behind — remotex's walk: ten points
-  after two frames each queued 60 ms or more, three back after thirty that
-  queued 30 ms or less, at most once a second. A frame's queueing is its
-  fence's round trip — answered once the client has the frame, which for
-  wlshare's own client means once its window has drawn it
-  ([below](#the-desktop-clients-paint)) — less the
-  shortest of the last 32, so distance does not read as queueing; a keyframe
-  counts towards that floor but is no verdict. Without Fence it is how long
-  writing the frame blocked. The dial moves on the running encoder, so a move
-  costs no keyframe, and an encoder made at a new size starts where it stands. Screen-content tuning, libvpx's
+- **A quantizer and a frame rate that follow the link.** The 1–100 dial maps
+  onto VP9's 8–63, finest last, as remotex's dial does; rate control is pinned
+  to wherever the dial is, with no bitrate, no adaptive quantization and no
+  dropped frames. A session starts at `vp9_quality` (90 by default, for the
+  LAN wlshare mostly runs on), which is a ceiling it never goes above, and
+  walks down to `vp9_quality_min` (20, or `vp9_quality` if that is lower)
+  while the client is behind — remotex's walk (`crates/wlshare/src/quality.rs`).
+  A frame's queueing is its fence's round trip — answered once the client has
+  the frame, which for wlshare's own client means once its window has drawn it
+  ([below](#the-desktop-clients-paint)) — less the shortest of the last 32, so
+  distance does not read as queueing; a keyframe counts towards that floor but
+  is no verdict. Without Fence it is how long writing the frame blocked. Two
+  behind frames (60 ms of queueing or more) among the last four give quality
+  up: ten points, twenty at 150 ms, thirty at 400 ms; once the dial is on the
+  floor the frame interval doubles instead, 33 ms up to 267, and at 400 ms
+  both go at once. A step is taken at most once a second, and while the lag
+  is still falling a fifth per second from the step before — the queue it
+  left draining — no further step is taken, since the step was enough; after
+  a keyframe the verdicts wait two seconds, since the frames behind it queue
+  behind its crossing. A second of clear frames (30 ms or less), four at the
+  least, takes frames back first, then quality in steps that double from
+  three to twenty-four while the link keeps taking them; a step the link
+  refuses within four seconds is walked back after 300 ms to the quality it
+  came from, and for fifteen seconds the walk climbs no further than halfway
+  back towards the one refused. The dial
+  moves on the running encoder, so a move costs no keyframe, and an encoder
+  made at a new size starts where it stands. A slowed session paces its own
+  frames; an unslowed one is paced by the capture and its one fence in flight.
+  Screen-content tuning, libvpx's
   realtime speed 7, no lag, and threads with row and tile parallelism: the
   machine's cores less two, at most eight, for the encoder, since an encode
   is a burst the person at the other end waits on, and libvpx clamps the tile
@@ -271,18 +285,22 @@ fixed:
   between the framebuffer's pixels and the planes is the `yuv` crate's, on
   the AVX2 or NEON path the machine has: a scalar loop over a 4K frame was a
   fifth of an encode and a third of a decode.
-- **A quiet desktop settles at `vp9_quality`.** The walk only runs when a
-  frame goes out, and a frame only goes out when something changed, so a
-  desktop that stops right after the link coarsened it would keep that
-  picture, and the walk would stay below the dial, until it changed again.
-  Once a frame encoded below `vp9_quality` has been delivered — its fence
-  answered, or without Fence its write finished — and nothing has been sent
-  for 500 ms since, the dial is taken back to `vp9_quality` and the unchanged
-  picture goes out again, at the next update the client asks for, as one inter
-  frame: libvpx codes the residual of unchanged blocks at the finer quantizer,
-  so it sharpens the whole desktop without a keyframe
+- **A quiet desktop is sharpened at `vp9_quality`, and the walk keeps its
+  place.** The walk only runs when a frame goes out, and a frame only goes out
+  when something changed, so a desktop that stops right after the link
+  coarsened it would keep that picture until it changed again. Once a frame
+  encoded below `vp9_quality` has been delivered — its fence answered, or
+  without Fence its write finished — and nothing has been sent for 500 ms
+  since, the unchanged picture goes out again, at the next update the client
+  asks for, as one inter frame at `vp9_quality`: libvpx codes the residual of
+  unchanged blocks at the finer quantizer, so it sharpens the whole desktop
+  without a keyframe
   (`a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe`
-  guards that). A frame that went out at `vp9_quality` owes nothing, and a
+  guards that). The encoder is retuned for that one frame and returned to the
+  walk's quality after it, and the frame is no verdict: the screen stopping
+  says nothing about the link, and a walk that started every burst of motion
+  from the ceiling was measured to put the picture half a second behind at
+  every one. A frame that went out at `vp9_quality` owes nothing, and a
   desktop that goes quiet after one sends nothing. remotex's settle for its
   own whole-desktop streams.
 - **Keyframes only when a decoder needs one**: the first frame after the
