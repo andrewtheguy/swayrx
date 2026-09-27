@@ -147,7 +147,7 @@ use crate::auth::Login;
 use crate::camera::{Camera, Signal as CameraSignal};
 use crate::framebuffer::{Rect, ResizeOrigin};
 use crate::microphone::{Microphone, Signal as MicrophoneSignal};
-use crate::quality::{Pace, QualityWalk};
+use wlshare_vp9::walk::{Pace, QualityWalk};
 use crate::shared::{ClientId, Command, Event, Shared};
 
 /// What the server offers at the security step, and what it checks the client
@@ -1339,11 +1339,10 @@ impl Session {
         if !self.use_vp9 || self.fence_outstanding || !(self.continuous || self.pending.is_some()) {
             return None;
         }
-        let interval = self.walk.interval();
-        if interval.is_zero() {
+        if !self.walk.slowed() {
             return None;
         }
-        self.frame_sent.map(|sent| sent + interval).filter(|at| Instant::now() < *at)
+        self.frame_sent.map(|sent| sent + self.walk.interval()).filter(|at| Instant::now() < *at)
     }
 
     /// When the desktop is to be settled at the configured quality: a frame
@@ -1382,10 +1381,10 @@ impl Session {
         let Some(pace) = moved else {
             return Ok(());
         };
-        if pace.interval.is_zero() {
-            debug!("client {}: VP9 quality {}", self.id.0, pace.quality);
-        } else {
+        if self.walk.slowed() {
             debug!("client {}: VP9 quality {}, at most one frame per {:?}", self.id.0, pace.quality, pace.interval);
+        } else {
+            debug!("client {}: VP9 quality {}", self.id.0, pace.quality);
         }
         if let Some(encoder) = &mut self.vp9 {
             encoder.set_quality(pace.quality).context("moving the VP9 quality")?;

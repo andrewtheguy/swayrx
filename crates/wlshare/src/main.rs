@@ -26,7 +26,6 @@ mod input;
 mod microphone;
 mod outputs;
 mod pam;
-mod quality;
 mod session;
 mod shared;
 

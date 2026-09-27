@@ -1769,6 +1769,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wlshare-rfb",
+ "wlshare-vp9",
  "xkbcommon",
 ]
 

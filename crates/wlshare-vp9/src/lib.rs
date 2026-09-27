@@ -16,9 +16,11 @@
 //! configured with, since VP9 carries no parameter sets a client could read one
 //! out of.
 //!
-//! What is not here is everything about *when*: which picture to encode, how a
-//! link is measured and the quality walked, how a frame is framed on a wire. Each
-//! user keeps its own.
+//! The dial is walked here too: [`walk::QualityWalk`] gives quality up when the
+//! link is behind, then the frame rate, and takes them back when it keeps up,
+//! the same walk for a stream wlshare codes and one the gateway does. What is
+//! not here is the rest of *when*: which picture to encode, where the link's
+//! lag is read from, how a frame is framed on a wire. Each user keeps its own.
 //!
 //! Two things about libvpx's shape are worth knowing before reading:
 //!
@@ -31,6 +33,8 @@
 //!   planes and must never reach `vpx_img_free`, and `vpx_codec_control_` is
 //!   variadic, so passing the wrong argument type for a control id compiles and
 //!   corrupts the stack.
+
+pub mod walk;
 
 use std::os::raw::{c_int, c_uint, c_ulong};
 

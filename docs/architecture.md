@@ -271,8 +271,8 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   to wherever the dial is, with no bitrate, no adaptive quantization and no
   dropped frames. A session starts at `vp9_quality` (90 by default, for the
   LAN wlshare mostly runs on), which is a ceiling it never goes above, and
-  walks down to a floor of 20 while the client is behind — remotex's walk
-  (`crates/wlshare/src/quality.rs`). The floor is a constant, not a key, as
+  walks down to a floor of 20 while the client is behind — the one walk both
+  run, `crates/wlshare-vp9/src/walk.rs`. The floor is a constant, not a key, as
   every adaptive stream's is: where WebRTC's quality scaler hands off from the
   quantizer to resolution and frame rate at its own threshold, this walk hands
   off to the frame rate, and the settle below sharpens a quiet desktop back at
@@ -281,7 +281,8 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   the frame, which for wlshare's own client means once its window has drawn it
   ([below](#the-desktop-clients-paint)) — less the shortest of the last
   minute's, so distance does not read as queueing; a keyframe counts towards
-  that floor but is no verdict. Without Fence it is how long writing the frame blocked. Two
+  that floor but is no verdict. Without Fence — and for a held dial, fence or
+  no fence — it is how long writing the frame blocked, 20 ms of it being behind. Two
   behind frames (60 ms of queueing or more) among the last four give quality
   up: ten points, twenty at 150 ms, thirty at 400 ms; once the dial is on the
   floor the capture's frame interval doubles instead, 33 ms up to 133 at the
