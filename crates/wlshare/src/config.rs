@@ -38,12 +38,11 @@ pub struct Config {
     pub max_fps: u32,
     /// The finest quality, 1–100, of the VP9 encoding a desktop client may ask
     /// for instead of ZRLE ([`wlshare_rfb::vp9`]). A session starts there and
-    /// gives quality up while its client falls behind ([`crate::quality`]).
+    /// gives quality up while its client falls behind ([`crate::quality`]),
+    /// then frames, from a floor of the encoder's own; a desktop that has gone
+    /// quiet is sharpened back here.
     #[serde(default = "default_vp9_quality")]
     pub vp9_quality: u8,
-    /// The coarsest quality a VP9 session gives up to, at most `vp9_quality`.
-    /// Unset, [`DEFAULT_VP9_QUALITY_MIN`] or `vp9_quality`, whichever is lower.
-    pub vp9_quality_min: Option<u8>,
     /// How many seconds a connection has to finish the handshake — the
     /// security exchange and the login — before it is dropped. A client that
     /// asks its user to confirm the server key and then type a password spends
@@ -141,10 +140,6 @@ fn default_vp9_quality() -> u8 {
     90
 }
 
-/// The VP9 floor when none is configured: low enough to keep a slow link
-/// moving, not so low that text is gone.
-const DEFAULT_VP9_QUALITY_MIN: u8 = 20;
-
 fn default_handshake_timeout_secs() -> u64 {
     120
 }
@@ -171,25 +166,12 @@ impl Config {
             wlshare_rfb::vp9::QUALITY_MIN,
             wlshare_rfb::vp9::QUALITY_MAX
         );
-        if let Some(min) = self.vp9_quality_min {
-            anyhow::ensure!(
-                (wlshare_rfb::vp9::QUALITY_MIN..=self.vp9_quality).contains(&min),
-                "vp9_quality_min must be from {} to vp9_quality ({})",
-                wlshare_rfb::vp9::QUALITY_MIN,
-                self.vp9_quality
-            );
-        }
         anyhow::ensure!(self.handshake_timeout_secs > 0, "handshake_timeout_secs must be at least 1");
         anyhow::ensure!(
             !(self.pam.is_some() && self.password.is_some()),
             "[pam] and [password] are two answers to the same question; keep one"
         );
         Ok(())
-    }
-
-    /// The coarsest quality a VP9 session gives up to.
-    pub fn vp9_quality_min(&self) -> u8 {
-        self.vp9_quality_min.unwrap_or(DEFAULT_VP9_QUALITY_MIN.min(self.vp9_quality))
     }
 
     /// Where the RSA-AES key lives when either table is set: that table's path,
@@ -225,7 +207,6 @@ mod tests {
         assert!(c.resize);
         assert_eq!(c.max_fps, 60);
         assert_eq!(c.vp9_quality, 90);
-        assert_eq!(c.vp9_quality_min(), 20);
         assert_eq!(c.handshake_timeout_secs, 120);
         assert!(!c.audio);
         assert!(!c.camera);
@@ -282,22 +263,12 @@ mod tests {
         }
     }
 
+    /// The floor key is gone: the settle sharpens a quiet desktop at the dial,
+    /// which is what the floor was for, and a file that still writes it is
+    /// refused as any unknown key is.
     #[test]
-    fn the_vp9_floor_sits_under_the_ceiling() {
-        let c: Config = toml::from_str("vp9_quality = 80\nvp9_quality_min = 45").unwrap();
-        c.validate().unwrap();
-        assert_eq!(c.vp9_quality_min(), 45);
-        // The default floor gives way to a ceiling below it; a configured one
-        // above the ceiling is refused.
-        let c: Config = toml::from_str("vp9_quality = 10").unwrap();
-        c.validate().unwrap();
-        assert_eq!(c.vp9_quality_min(), 10);
-        for off in ["vp9_quality = 50\nvp9_quality_min = 51", "vp9_quality_min = 0"] {
-            let c: Config = toml::from_str(off).unwrap();
-            assert!(c.validate().is_err(), "{off}");
-        }
-        let c: Config = toml::from_str("vp9_quality = 50\nvp9_quality_min = 50").unwrap();
-        c.validate().unwrap();
+    fn a_vp9_floor_is_no_longer_a_key() {
+        assert!(toml::from_str::<Config>("vp9_quality = 80\nvp9_quality_min = 45").is_err());
     }
 
     #[test]
