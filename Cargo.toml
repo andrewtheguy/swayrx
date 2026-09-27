@@ -6,8 +6,8 @@
 # `cargo test` on a development machine of any OS exercises the protocol crate
 # and the client and nothing else. Build the daemon explicitly with `-p wlshare`.
 [workspace]
-members = ["crates/wlshare-rfb", "crates/wlshare-client", "crates/wlshare"]
-default-members = ["crates/wlshare-rfb", "crates/wlshare-client"]
+members = ["crates/wlshare-vp9", "crates/wlshare-rfb", "crates/wlshare-client", "crates/wlshare"]
+default-members = ["crates/wlshare-vp9", "crates/wlshare-rfb", "crates/wlshare-client"]
 resolver = "3"
 
 [workspace.package]

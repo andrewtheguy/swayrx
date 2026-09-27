@@ -1,0 +1,23 @@
+[package]
+name = "wlshare-vp9"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "VP9 for a desktop picture, as wlshare and the remotex gateway both code it: libvpx pinned to a 1–100 quality dial, BT.601 4:2:0 or 4:4:4 planes in front of it, the decoder, and what a frame says about itself"
+
+# The one place libvpx is spoken to. Platform-independent and dependency-light on
+# purpose: the daemon, the desktop client and the remotex gateway all build it, and
+# a change to how a desktop is coded is made here once for all three.
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+# libvpx 1.16 as a static archive for this target, downloaded and checked by the
+# crate's build script — nothing to configure, assemble or install. The archives
+# cover macOS arm64, Linux x86_64 and aarch64 and Windows x86_64, which is every
+# place a user of this crate is built. VP9-only, built `--enable-realtime-only`.
+vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260924182850-e78d74f" }
+# The conversions between packed RGB or BGRX and the planes libvpx takes and
+# gives back: pure Rust with AVX2 and NEON paths chosen at run time, three to
+# four times the speed of a scalar loop on a 4K frame.
+yuv = "0.8"
