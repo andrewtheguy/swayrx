@@ -309,14 +309,16 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   what was asked for. `WLS0` (`0x574c5330`) asks for 4:2:0 in place of 4:4:4;
   `0x574c5100` plus a quality 1–100 (`WLQ` and the value) names the ceiling the
   walk never goes above, in place of `vp9_quality`; `WLSD` (`0x574c5344`)
-  holds the dial there, with a walk that hears nothing in a fence and a settle
-  with nothing to sharpen. The gateway lists them from the target's keys, so
+  holds the dial there, with a walk that hears nothing in a fence — only a
+  frame whose write blocked moves it, fence or no fence — and a settle with
+  nothing to sharpen. The gateway lists them from the target's keys, so
   `render_chroma`, `video_quality` and `render_adaptive` mean on a passed
   stream what they mean on one the gateway codes. Read at every
-  `SetEncodings`: a new chroma starts the stream over at a keyframe, a new
-  ceiling or walk moves the running encoder's dial without one. A list that
-  names none of them — every desktop client's — is 4:4:4 at `vp9_quality`
-  with the walk.
+  `SetEncodings`, and owed a frame whether or not the desktop changed: a new
+  chroma starts the stream over at a keyframe, a new ceiling moves the running
+  encoder's dial and sends the picture once at it, as a settle does, and a new
+  walk moves the dial alone. A list that names none of them — every desktop
+  client's — is 4:4:4 at `vp9_quality` with the walk.
   Screen-content tuning, libvpx's
   realtime speed 7, no lag, and threads with row and tile parallelism: the
   machine's cores less two, at most eight, for the encoder, since an encode

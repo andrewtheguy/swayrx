@@ -663,8 +663,12 @@ impl Session {
                 if changed {
                     // A new ceiling or walk is a fresh walk from the ceiling, which
                     // a running encoder follows without a keyframe; a new chroma
-                    // is a new stream, which starts at one.
+                    // is a new stream, which starts at one. Either is owed the
+                    // picture the client holds whether or not the desktop changed:
+                    // the whole desktop as a keyframe for a new stream, and once at
+                    // a new ceiling, as a settle sends it, for a running one.
                     let rechroma = stream.chroma != self.stream.chroma;
+                    let new_ceiling = stream.quality != self.stream.quality;
                     self.stream = stream;
                     self.walk = QualityWalk::new(stream.quality, self.config.capture, stream.adaptive);
                     self.coarse_since = None;
@@ -672,8 +676,12 @@ impl Session {
                     if rechroma {
                         self.vp9 = None;
                         self.keyframe_owed = true;
+                        if vp9 {
+                            self.seen = 0;
+                        }
                     } else if let Some(encoder) = &mut self.vp9 {
                         encoder.set_quality(self.walk.quality()).context("moving the VP9 quality to the client's ceiling")?;
+                        self.settle_owed = new_ceiling && vp9;
                     }
                 }
                 if vp9 && (changed || !self.use_vp9) {
@@ -1267,20 +1275,20 @@ impl Session {
             self.settle_owed = false;
             self.frame_sent = Some(sent);
         }
-        match vp9.map(|(_, verdict)| verdict) {
-            Some(verdict) if self.fence_supported => self.vp9_in_flight = Some((sent, verdict)),
-            Some(verdict) => {
-                let now = Instant::now();
-                if verdict {
-                    let moved = self.walk.written(now.saturating_duration_since(sent), now);
-                    self.follow_walk(moved)?;
-                }
-                // Without Fence, a written frame is as delivered as it gets.
-                if self.coarse_since.is_some() {
-                    self.coarse_since = Some(now);
-                }
+        if let Some((_, verdict)) = vp9 {
+            let now = Instant::now();
+            if verdict {
+                // How long the socket had no room for the frame, which the
+                // walk hears now or leaves to the fence.
+                let moved = self.walk.written(now.saturating_duration_since(sent), self.fence_supported, now);
+                self.follow_walk(moved)?;
             }
-            None => {}
+            if self.fence_supported {
+                self.vp9_in_flight = Some((sent, verdict));
+            } else if self.coarse_since.is_some() {
+                // Without Fence, a written frame is as delivered as it gets.
+                self.coarse_since = Some(now);
+            }
         }
         self.seen = generation;
         self.pending = None;

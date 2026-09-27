@@ -292,9 +292,15 @@ impl QualityWalk {
         quality < self.ceiling
     }
 
-    /// A delta frame, for a client without Fence, took `blocked` to write:
-    /// time the socket had no room for it, which is queueing already.
-    pub fn written(&mut self, blocked: Duration, now: Instant) -> Option<Pace> {
+    /// A delta frame took `blocked` to write: time the socket had no room for
+    /// it, which is queueing already. `fenced` is whether the frame's fence is
+    /// still to come: a lag-aware walk then waits for the delivery it reports,
+    /// which this time is part of, while a walk that is not hears the
+    /// pressure here — the one signal it takes, fence or no fence.
+    pub fn written(&mut self, blocked: Duration, fenced: bool, now: Instant) -> Option<Pace> {
+        if fenced && self.lag_aware {
+            return None;
+        }
         self.observe(blocked, now)
     }
 
@@ -737,13 +743,27 @@ mod tests {
     fn a_blocked_write_is_lag_without_a_floor() {
         let start = Instant::now();
         let mut walk = QualityWalk::new(60, CAPTURE, true);
-        assert_eq!(walk.written(80 * MS, start), None);
-        assert_eq!(walk.written(80 * MS, start).map(|pace| pace.quality), Some(50));
+        assert_eq!(walk.written(80 * MS, false, start), None);
+        assert_eq!(walk.written(80 * MS, false, start).map(|pace| pace.quality), Some(50));
+    }
+
+    /// With a fence to come, a lag-aware walk leaves the write to the fence:
+    /// the delivery it reports has the blocked time in it, and hearing both
+    /// would make one frame two verdicts.
+    #[test]
+    fn a_lag_aware_walk_leaves_a_fenced_write_to_its_fence() {
+        let start = Instant::now();
+        let mut walk = QualityWalk::new(60, CAPTURE, true);
+        for _ in 0..8 {
+            assert_eq!(walk.written(400 * MS, true, start), None);
+        }
+        assert_eq!(walk.quality(), 60);
     }
 
     /// A client that asked for its dial held gets a walk that is not
     /// lag-aware: its fences say nothing, however late, and only a blocked
-    /// write — pressure, the walk's historical shape — moves it.
+    /// write — pressure, the walk's historical shape — moves it, whether or
+    /// not a fence follows the write.
     #[test]
     fn a_walk_that_is_not_lag_aware_hears_nothing_in_a_fence() {
         let start = Instant::now();
@@ -752,8 +772,11 @@ mod tests {
             assert_eq!(walk.fenced(400 * MS, true, start), None);
         }
         assert_eq!(walk.quality(), 60);
-        assert_eq!(walk.written(80 * MS, start), None);
-        assert_eq!(walk.written(80 * MS, start).map(|pace| pace.quality), Some(50));
+        assert_eq!(walk.written(80 * MS, true, start), None);
+        assert_eq!(walk.written(80 * MS, true, start).map(|pace| pace.quality), Some(50));
+        let mut walk = QualityWalk::new(60, CAPTURE, false);
+        assert_eq!(walk.written(80 * MS, false, start), None);
+        assert_eq!(walk.written(80 * MS, false, start).map(|pace| pace.quality), Some(50));
     }
 
     #[test]
