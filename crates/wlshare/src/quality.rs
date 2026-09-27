@@ -257,12 +257,14 @@ impl QualityWalk {
     /// behind that one large picture are not read as the link giving way. The
     /// clear run starts over too: the quiet is no evidence of room, and a run
     /// that spanned it would take quality back on the first frame of every
-    /// burst.
+    /// burst. And a step up before the settle is no longer the last move: lag
+    /// behind the settle's frame is that frame's, not a refusal of the step.
     pub fn settle(&mut self, now: Instant) {
         self.verdicts = 0;
         self.clear = None;
         self.changed_at = Some(now);
         self.stepped_on = None;
+        self.reclaimed = None;
     }
 
     /// A keyframe went out: the verdicts wait [`KEYFRAME_HOLD`] for it to
@@ -618,6 +620,13 @@ mod tests {
         walk.fenced(140 * MS, true, soon);
         assert_eq!(walk.fenced(140 * MS, true, soon), None, "the settle's frames were walked back on the refusal's cooldown");
         assert_eq!(walk.quality(), 83);
+        // After the full cooldown, still inside the refusal window of the step
+        // up: an ordinary step down from the settle, not a refusal of the step.
+        let later = at + 33 * MS + ADJUST_COOLDOWN;
+        assert!(later.saturating_duration_since(at) <= REFUSAL_WINDOW);
+        // The two behind frames above are still in the window: this one is the verdict.
+        assert_eq!(walk.fenced(140 * MS, true, later).map(|pace| pace.quality), Some(73), "the step up was refused across a settle");
+        assert_eq!(walk.refused, None, "a refusal cap was installed across a settle");
     }
 
     #[test]
