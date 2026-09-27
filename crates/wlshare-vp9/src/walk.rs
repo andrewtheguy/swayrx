@@ -1,15 +1,15 @@
-//! The VP9 quality and frame rate a session's link will bear.
+//! The quality and frame rate a link will bear, walked on the 1–100 dial.
 //!
-//! The configured `vp9_quality` is a ceiling and [`QUALITY_FLOOR`] the floor;
-//! between them the dial walks down when the client falls behind and back up
-//! when it keeps up, and past the floor it is the frame rate that goes. The
-//! signal is how long a frame takes to be delivered, decoded and — for a
-//! client that answers its fence from its window, as wlshare's own does —
-//! drawn: the round trip of the fence that follows it, or, for a client
-//! without Fence, how long writing it blocked — less the link's own floor, the
-//! shortest delivery seen lately, so a distant link that keeps up reads as
-//! keeping up. What is left is queueing: time spent behind frames the link or
-//! the client could not take as fast as they came.
+//! The configured quality is a ceiling and [`QUALITY_FLOOR`] the floor; between
+//! them the dial walks down when the client falls behind and back up when it
+//! keeps up, and past the floor it is the frame rate that goes. The signal is
+//! queueing: time a frame spent behind frames the link or the client could not
+//! take as fast as they came. Where it is read from is the caller's: how long
+//! writing the frame blocked, which is the socket having no room; the round
+//! trip of a fence the client answers once it has the frame, less the link's
+//! own floor, the shortest delivery seen lately, so a distant link that keeps
+//! up reads as keeping up ([`QualityWalk::fenced`]); or the lag of a paint
+//! window the client reports, already floored ([`QualityWalk::observe`]).
 //!
 //! One-directional by construction: the walk never goes above the ceiling,
 //! since a link with room to spare shows no more of it than one that is merely
@@ -19,35 +19,51 @@
 //! them and stop short of a quality it refused, so a link that is
 //! intermittently bad settles at a quality it can hold rather than oscillating
 //! around one it cannot. Two knobs in a fixed order: quality down to the floor,
-//! then the frame interval doubled up to [`SLOW_MAX`] times; frames back first
-//! and quality after. The same walk remotex runs for its own VP9 streams.
+//! then the frame interval doubled up to `SLOW_MAX` times; frames back first
+//! and quality after. The dial rather than a quantizer, because a quantizer is
+//! the codec's own scale and the mapping lives with the encoder.
 //!
 //! What the walk holds is what a *moving* picture is coded at. A desktop that
 //! went quiet below the ceiling is sharpened there once — [`QualityWalk::settle`]
 //! — and the walk keeps its place through it: the link did not get any wider
 //! because the screen stopped.
 //!
+//! A walk that is not lag-aware — a client that asked for its dial held — hears
+//! nothing in a fence or a paint window, however late, and moves on a blocked
+//! write alone: pressure, the walk's historical shape.
+//!
 //! Pure, and takes `now` rather than reading a clock, so every decision is
-//! testable without waiting for one.
+//! testable without waiting for one. The thresholds and steps were settled by
+//! measurement on shaped links, and the reasons are on each.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+/// How long writing a frame may block before it counts as one the link could
+/// not keep up with. More than half a frame at 30 Hz. The queues between the
+/// encoder and the socket are shallow on purpose, so this stays at zero while
+/// the link has room and becomes obvious the moment it does not.
+const BEHIND_BLOCK: Duration = Duration::from_millis(20);
+
 /// Queueing past which a frame counts as one the link could not keep up with.
+/// Well under a client's own lag gate on purpose: this moves quality while the
+/// client's window is still open, before the stall.
 const LAG_BEHIND: Duration = Duration::from_millis(60);
 
 /// Queueing that is not a little behind but a lot: a step down here gives up
 /// twice [`STEP_DOWN`], and past [`LAG_SEVERE`] three times and halves the
 /// frame rate besides, whatever the quality. A link this far behind has a
-/// queue growing by the frame, and ten points a second is too slow for it.
+/// queue growing by the frame, and ten points a second was measured to take
+/// seven seconds to reach the floor while the picture fell a second behind.
+/// Read from the lag or from the blocked write, whichever is the larger.
 const LAG_HEAVY: Duration = Duration::from_millis(150);
 /// See [`LAG_HEAVY`].
 const LAG_SEVERE: Duration = Duration::from_millis(400);
 
 /// Queueing below which a frame counts as clear. Between this and
-/// [`LAG_BEHIND`] is hysteresis: a link hovering there earns neither a coarser
+/// `LAG_BEHIND` is hysteresis: a link hovering there earns neither a coarser
 /// picture nor its quality back.
-const LAG_CLEAR: Duration = Duration::from_millis(30);
+pub const LAG_CLEAR: Duration = Duration::from_millis(30);
 
 /// Behind frames among the last [`VERDICT_WINDOW`] before quality is given up,
 /// the latest among them. Two rather than one, so a single unlucky frame is not
@@ -62,7 +78,8 @@ const VERDICT_WINDOW: u32 = 4;
 /// the fewest clear frames that span must hold: deliberately far more than
 /// [`BEHIND_FRAMES`]. A span rather than a count of frames, because the
 /// frames come as slowly as the link has been slowed to: thirty of them at
-/// four a second was a wait no burst of motion ever finished.
+/// four a second was a wait no burst of motion ever finished, and a walk
+/// slowed to the floor by its first keyframe stayed there for the session.
 const CLEAR_SPAN: Duration = Duration::from_secs(1);
 /// See [`CLEAR_SPAN`].
 const CLEAR_FRAMES: u32 = 4;
@@ -70,8 +87,10 @@ const CLEAR_FRAMES: u32 = 4;
 /// How long after a keyframe the verdicts wait. A keyframe is the whole
 /// picture and no verdict itself, but the frames behind it queue behind its
 /// transmission, and that queue says how big the keyframe was, not what the
-/// link bears. Twice [`ADJUST_COOLDOWN`], for a keyframe that takes a second
-/// and a half to cross a 2 Mbit/s link.
+/// link bears: read as lag, the first keyframe of a 5 Mbit/s session put the
+/// walk on the floor at a quarter of the frames within two seconds. Twice
+/// [`ADJUST_COOLDOWN`], for a keyframe that takes a second and a half to cross
+/// a 2 Mbit/s link.
 const KEYFRAME_HOLD: Duration = Duration::from_secs(2);
 
 /// The least time between two moves of the dial, so a burst of slow frames is
@@ -80,27 +99,34 @@ const ADJUST_COOLDOWN: Duration = Duration::from_secs(1);
 
 /// The least time between a step up and the step down that walks it back. Far
 /// shorter than [`ADJUST_COOLDOWN`]: a step up the link refuses shows in the
-/// next few frames, and every frame it is left in place is queue.
+/// next few frames, and every frame it is left in place is queue — at 5 Mbit/s
+/// a step from 61 to 85 left in place for the full cooldown put the picture a
+/// second behind before it was walked back.
 const REFUSAL_COOLDOWN: Duration = Duration::from_millis(300);
 
 /// How much the lag must have fallen since the last step down for the queue to
 /// count as draining, as a fraction of what it was: a fifth. A step down that
 /// put the stream under the link leaves the queue it built to drain, and the
 /// lag stays high while it does — for seconds, on a link only a little wider
-/// than the stream — without saying the step was too small. So while the lag
-/// is falling this fast the walk waits, and steps again only when it has
-/// stopped falling.
+/// than the stream — without saying the step was too small. A second step on
+/// that lag is the overshoot measured at 5 Mbit/s, 69 to the floor in three
+/// seconds for a link that carried 55; so while the lag is falling this fast
+/// the walk waits, and steps again only when it has stopped falling.
 const DRAIN_FRACTION: u32 = 5;
 
 /// How far one step down moves the dial on a link a little behind, and the
 /// first step up. Bigger down than up, for the same reason [`CLEAR_FRAMES`] is
-/// bigger than [`BEHIND_FRAMES`].
+/// bigger than [`BEHIND_FRAMES`]. Ten points down and three back is roughly
+/// four quantizer steps against one, on the dial's scale.
 const STEP_DOWN: u8 = 10;
+/// See [`STEP_DOWN`].
 const STEP_UP: u8 = 3;
 
 /// The most one step up reclaims. Every step up the link takes doubles the
 /// next, from [`STEP_UP`] to this, and a step down puts it back: a link that
-/// has recovered is on the ceiling again within a few seconds of motion.
+/// has recovered is on the ceiling again within a few seconds of motion, where
+/// three points a second took twenty-three seconds from the floor to a ceiling
+/// of 90 — most of a session, on a link that only stumbled.
 const STEP_UP_MAX: u8 = 24;
 
 /// How long a quality the link refused stays out of reach. A step down within
@@ -108,7 +134,8 @@ const STEP_UP_MAX: u8 = 24;
 /// was just given, and the walk keeps under it for this long before probing
 /// there again, with the smallest step — TCP's slow-start threshold, on the
 /// dial. Without it a walk whose steps double on the way up would spend a
-/// session bouncing off the same quality.
+/// session bouncing off the same quality: measured at 5 Mbit/s, plain steps of
+/// three already cycled 47 → 59 → 49 → 59 every ten seconds.
 const REFUSAL_HOLD: Duration = Duration::from_secs(15);
 /// See [`REFUSAL_HOLD`].
 const REFUSAL_WINDOW: Duration = Duration::from_secs(4);
@@ -122,17 +149,17 @@ const REFUSAL_WINDOW: Duration = Duration::from_secs(4);
 /// can see, and the settle sharpens a quiet desktop at the ceiling whatever
 /// the walk holds. A ceiling below it is on the floor from the start and
 /// gives up frames alone.
-const QUALITY_FLOOR: u8 = 20;
+pub const QUALITY_FLOOR: u8 = 20;
 
-/// How many times the capture's frame interval may be doubled — 60 Hz down to
-/// 7.5 at the default `max_fps` — for a link still behind on the floor. Bytes
-/// on the wire are bytes per frame times frames per second, and the floor
-/// bounds only the first; fewer frames are fresh frames. The quality goes
-/// first because a coarser picture of every movement reads better than a
-/// sharp one of every fourth, and comes back last for the same reason. An
-/// unslowed link is paced by the capture alone, and each step halves what
-/// the capture gives, so the first one is the next rung down and not a jump
-/// over it ([`QualityWalk::interval`]).
+/// How many times the frame interval may be doubled — a 30 Hz stream down to
+/// 3.75, a 60 Hz capture down to 7.5 — for a link still behind on the floor.
+/// Bytes on the wire are bytes per frame times frames per second, and the
+/// floor bounds only the first: on a 2 Mbit/s link the picture ran 0.7 s
+/// behind at the floor with nothing left to give up, and with the frames going
+/// as well it ran 0.2 s behind at a fifth of the frames, every one of them
+/// fresh. The quality goes first because a coarser picture of every movement
+/// reads better than a sharp one of every fourth, and comes back last for the
+/// same reason.
 const SLOW_MAX: u8 = 3;
 
 /// How far back the deliveries go whose minimum is the link's floor. A window
@@ -153,16 +180,18 @@ pub struct Pace {
     pub interval: Duration,
 }
 
+/// See the [module](self).
+#[derive(Debug)]
 pub struct QualityWalk {
     /// The configured quality: the finest this ever asks for.
     ceiling: u8,
-    /// Whether the client's lag, as its fences report it, is a signal this
-    /// walk listens to. A client that asked for its dial held is not: the walk
-    /// keeps its historical shape, pressure only, and a fence teaches nothing.
+    /// Whether the client's lag, as its fences or its paint window report it,
+    /// is a signal this walk listens to. A client that asked for its dial held
+    /// is not: the walk keeps its historical shape, pressure only.
     lag_aware: bool,
-    /// The interval the capture paces frames to, which a slowed link's is
-    /// doubled from.
-    capture: Duration,
+    /// The interval frames come at on a link that is not slowed, which a
+    /// slowed link's is doubled from.
+    frame: Duration,
     /// The quality in force for a moving picture.
     quality: u8,
     /// How many times the frame interval is doubled, at most [`SLOW_MAX`].
@@ -176,11 +205,14 @@ pub struct QualityWalk {
     /// The clear frames since the link was last behind: when the first came,
     /// and how many.
     clear: Option<(Instant, u32)>,
-    /// When the dial last moved, for [`ADJUST_COOLDOWN`].
+    /// When the dial last moved, for [`ADJUST_COOLDOWN`]. `None` before it
+    /// ever has, so the first verdict does not wait out a cooldown that never
+    /// ran.
     changed_at: Option<Instant>,
     /// Until when the verdicts wait, after a keyframe ([`KEYFRAME_HOLD`]).
     held_until: Option<Instant>,
-    /// What the next step up reclaims.
+    /// What the next step up reclaims: [`STEP_UP`], doubling with every step
+    /// up the link takes, to [`STEP_UP_MAX`].
     reclaim: u8,
     /// When the last step up was taken and the quality it left, while it is
     /// the last move made: a step down within [`REFUSAL_WINDOW`] of it is a
@@ -188,22 +220,24 @@ pub struct QualityWalk {
     reclaimed: Option<(u8, Instant)>,
     /// The highest quality the walk may reach while a refusal holds, and
     /// when it was refused: halfway between the quality the link bore and
-    /// the one it would not take.
+    /// the one it would not take, for [`REFUSAL_HOLD`].
     refused: Option<(u8, Instant)>,
     /// The lag the last step down was taken on, while no step up has
-    /// followed: what the next step down waits to see stop falling.
+    /// followed: what the next step down waits to see stop falling
+    /// ([`DRAIN_FRACTION`]).
     stepped_on: Option<Duration>,
 }
 
 impl QualityWalk {
-    /// A walk that starts at `ceiling` and goes down to [`QUALITY_FLOOR`], on a
-    /// capture paced to `capture`; `adaptive` is whether the client's lag moves
-    /// it, and without it only a blocked write does.
-    pub fn new(ceiling: u8, capture: Duration, adaptive: bool) -> Self {
+    /// A walk that starts at `ceiling` and goes down to [`QUALITY_FLOOR`], on
+    /// frames that come `frame` apart when the link is not slowed; `adaptive`
+    /// is whether the client's lag moves it, and without it only a blocked
+    /// write does.
+    pub fn new(ceiling: u8, frame: Duration, adaptive: bool) -> Self {
         Self {
             ceiling,
             lag_aware: adaptive,
-            capture,
+            frame,
             quality: ceiling,
             slow: 0,
             recent: VecDeque::new(),
@@ -218,24 +252,48 @@ impl QualityWalk {
         }
     }
 
+    /// The configured quality, which the walk never goes above.
+    pub fn ceiling(&self) -> u8 {
+        self.ceiling
+    }
+
+    /// Whether the client's lag is a signal this walk listens to.
+    pub fn lag_aware(&self) -> bool {
+        self.lag_aware
+    }
+
     /// The quality in force.
     pub fn quality(&self) -> u8 {
         self.quality
     }
 
-    /// The least gap between two frames: none on a link that is not slowed,
-    /// where the capture paces, and the capture's interval doubled once per
-    /// step the link has been slowed.
-    pub fn interval(&self) -> Duration {
-        if self.slow == 0 {
-            Duration::ZERO
-        } else {
-            self.capture * (1u32 << self.slow)
-        }
+    /// The encoder could not be moved and stays at `quality`: the walk stands
+    /// there too, so its next verdict starts from what is in force.
+    pub fn stays_at(&mut self, quality: u8) {
+        self.quality = quality;
     }
 
-    fn pace(&self) -> Pace {
+    /// Whether the link has been slowed past the floor: the frames are going,
+    /// and [`Self::interval`] is more than the frame's.
+    pub fn slowed(&self) -> bool {
+        self.slow > 0
+    }
+
+    /// The least gap between two frames: the frame interval, doubled once per
+    /// step the link has been slowed.
+    pub fn interval(&self) -> Duration {
+        self.frame * (1u32 << self.slow)
+    }
+
+    /// Where the walk stands.
+    pub fn pace(&self) -> Pace {
         Pace { quality: self.quality, interval: self.interval() }
+    }
+
+    /// Whether `quality` is below the ceiling: a frame encoded there is one a
+    /// quiet desktop owes a settle for.
+    pub fn coarse(&self, quality: u8) -> bool {
+        quality < self.ceiling
     }
 
     /// A frame's fence came back `delivery` after the frame was written.
@@ -257,39 +315,7 @@ impl QualityWalk {
             return None;
         }
         let floor = self.recent.iter().map(|(_, delivery)| *delivery).min().unwrap_or_default();
-        self.observe(delivery.saturating_sub(floor), now)
-    }
-
-    /// A desktop that went quiet below the ceiling is being sharpened there
-    /// with one frame: the walk keeps its place, since the screen stopping
-    /// says nothing about the link, and starts its verdicts over from here
-    /// with the cooldown restarted like any other move, so the frames queued
-    /// behind that one large picture are not read as the link giving way. The
-    /// clear run starts over too: the quiet is no evidence of room, and a run
-    /// that spanned it would take quality back on the first frame of every
-    /// burst. And a step up before the settle is no longer the last move: lag
-    /// behind the settle's frame is that frame's, not a refusal of the step.
-    pub fn settle(&mut self, now: Instant) {
-        self.verdicts = 0;
-        self.clear = None;
-        self.changed_at = Some(now);
-        self.stepped_on = None;
-        self.reclaimed = None;
-    }
-
-    /// A keyframe went out: the verdicts wait [`KEYFRAME_HOLD`] for it to
-    /// cross the link, and start over after it.
-    pub fn keyframe(&mut self, now: Instant) {
-        self.verdicts = 0;
-        self.clear = None;
-        self.stepped_on = None;
-        self.held_until = Some(now + KEYFRAME_HOLD);
-    }
-
-    /// Whether `quality` is below the ceiling: a frame encoded there is one a
-    /// quiet desktop owes a settle for.
-    pub fn coarse(&self, quality: u8) -> bool {
-        quality < self.ceiling
+        self.observe(Duration::ZERO, delivery.saturating_sub(floor), now)
     }
 
     /// A delta frame took `blocked` to write: time the socket had no room for
@@ -301,15 +327,20 @@ impl QualityWalk {
         if fenced && self.lag_aware {
             return None;
         }
-        self.observe(blocked, now)
+        self.observe(blocked, Duration::ZERO, now)
     }
 
-    fn observe(&mut self, lag: Duration, now: Instant) -> Option<Pace> {
+    /// A delta frame's verdict: how long queueing it `blocked`, and how far
+    /// behind the client's `lag` is, already less the link's floor. A walk that
+    /// is not lag-aware reads the first alone. Returns where the walk stands if
+    /// the dial moved.
+    pub fn observe(&mut self, blocked: Duration, lag: Duration, now: Instant) -> Option<Pace> {
+        let lag = if self.lag_aware { lag } else { Duration::ZERO };
         if self.held_until.is_some_and(|until| now < until) {
             return None;
         }
         self.held_until = None;
-        let behind = lag >= LAG_BEHIND;
+        let behind = blocked >= BEHIND_BLOCK || lag >= LAG_BEHIND;
         self.verdicts = ((self.verdicts << 1) | u8::from(behind)) & ((1 << VERDICT_WINDOW) - 1);
         if behind {
             self.clear = None;
@@ -318,6 +349,7 @@ impl QualityWalk {
             // run: not evidence of room, not evidence against it either.
             self.clear = Some(self.clear.map_or((now, 1), |(since, count)| (since, count + 1)));
         }
+        let lag = lag.max(blocked);
         // Walking back a step up the link refused does not wait out the full
         // cooldown: the refusal is in the next few frames, and every one is queue.
         // Only while that step is the last move, though: a settle after it is a
@@ -352,6 +384,32 @@ impl QualityWalk {
         self.clear = None;
         self.changed_at = Some(now);
         Some(self.pace())
+    }
+
+    /// A desktop that went quiet below the ceiling is being sharpened there
+    /// with one frame: the walk keeps its place, since the screen stopping
+    /// says nothing about the link, and starts its verdicts over from here
+    /// with the cooldown restarted like any other move, so the frames queued
+    /// behind that one large picture are not read as the link giving way. The
+    /// clear run starts over too: the quiet is no evidence of room, and a run
+    /// that spanned it would take quality back on the first frame of every
+    /// burst. And a step up before the settle is no longer the last move: lag
+    /// behind the settle's frame is that frame's, not a refusal of the step.
+    pub fn settle(&mut self, now: Instant) {
+        self.verdicts = 0;
+        self.clear = None;
+        self.changed_at = Some(now);
+        self.stepped_on = None;
+        self.reclaimed = None;
+    }
+
+    /// A keyframe went out: the verdicts wait `KEYFRAME_HOLD` for it to
+    /// cross the link, and start over after it.
+    pub fn keyframe(&mut self, now: Instant) {
+        self.verdicts = 0;
+        self.clear = None;
+        self.stepped_on = None;
+        self.held_until = Some(now + KEYFRAME_HOLD);
     }
 
     /// Give quality up, or frames once there is no quality left to give.
@@ -427,7 +485,8 @@ mod tests {
     /// A 60 Hz capture, the default: slowed once, 30 Hz.
     const CAPTURE: Duration = Duration::from_micros(16_667);
 
-    /// A walk that has learnt a 40 ms link floor from one clear delivery.
+    /// A lag-aware walk that has learnt a 40 ms link floor from one clear
+    /// delivery.
     fn walk(ceiling: u8, start: Instant) -> QualityWalk {
         let mut walk = QualityWalk::new(ceiling, CAPTURE, true);
         assert_eq!(walk.fenced(40 * MS, true, start), None);
@@ -447,6 +506,19 @@ mod tests {
         (moved, at)
     }
 
+    /// `count` frames 33 ms apart from `at` whose push did not block and whose
+    /// window is not behind: the last move, and when they ended.
+    fn clear_pushes(walk: &mut QualityWalk, count: u32, mut at: Instant) -> (Option<Pace>, Instant) {
+        let mut moved = None;
+        for _ in 0..count {
+            at += 33 * MS;
+            if let Some(pace) = walk.observe(Duration::ZERO, Duration::ZERO, at) {
+                moved = Some(pace);
+            }
+        }
+        (moved, at)
+    }
+
     #[test]
     fn a_link_that_keeps_up_stays_at_the_ceiling_however_far_away() {
         let start = Instant::now();
@@ -455,7 +527,20 @@ mod tests {
             assert_eq!(walk.fenced(45 * MS, true, start + i * 10 * MS), None);
         }
         assert_eq!(walk.quality(), 60);
-        assert_eq!(walk.interval(), Duration::ZERO);
+        assert_eq!(walk.interval(), CAPTURE);
+        assert!(!walk.slowed());
+    }
+
+    /// The ceiling is a ceiling: a link with room to spare has nothing above it
+    /// to reclaim.
+    #[test]
+    fn a_clear_link_stays_on_the_ceiling() {
+        let start = Instant::now();
+        let mut walk = QualityWalk::new(30, CAPTURE, false);
+        let (moved, _) = clear_pushes(&mut walk, CLEAR_RUN * 4, start);
+        assert_eq!(moved, None);
+        assert_eq!(walk.pace(), Pace { quality: 30, interval: CAPTURE });
+        assert_eq!(walk.ceiling(), 30);
     }
 
     #[test]
@@ -464,7 +549,7 @@ mod tests {
         // Two steps above the floor, so the walk reaches it in three.
         let mut walk = walk(QUALITY_FLOOR + 2 * STEP_DOWN + 5, start);
         assert_eq!(walk.fenced(140 * MS, true, start), None, "one slow frame is not a verdict");
-        assert_eq!(walk.fenced(140 * MS, true, start), Some(Pace { quality: QUALITY_FLOOR + STEP_DOWN + 5, interval: Duration::ZERO }));
+        assert_eq!(walk.fenced(140 * MS, true, start), Some(Pace { quality: QUALITY_FLOOR + STEP_DOWN + 5, interval: CAPTURE }));
         for _ in 0..4 {
             assert_eq!(walk.fenced(140 * MS, true, start + 500 * MS), None, "inside the cooldown");
         }
@@ -473,10 +558,8 @@ mod tests {
         assert_eq!(walk.fenced(140 * MS, true, start + 2200 * MS).map(|pace| pace.quality), Some(QUALITY_FLOOR), "stops at the floor");
         // On the floor, the frames go: doubled once per verdict, to the limit.
         walk.fenced(140 * MS, true, start + 3300 * MS);
-        assert_eq!(
-            walk.fenced(140 * MS, true, start + 3300 * MS),
-            Some(Pace { quality: QUALITY_FLOOR, interval: CAPTURE * 2 })
-        );
+        assert_eq!(walk.fenced(140 * MS, true, start + 3300 * MS), Some(Pace { quality: QUALITY_FLOOR, interval: CAPTURE * 2 }));
+        assert!(walk.slowed());
         for i in 2..=u32::from(SLOW_MAX) + 1 {
             let at = start + (2200 + 1100 * i) * MS;
             walk.fenced(140 * MS, true, at);
@@ -489,15 +572,43 @@ mod tests {
         assert_eq!(walk.quality(), QUALITY_FLOOR);
     }
 
+    /// A push that blocked is the same verdict as a client behind, on a walk
+    /// that is not lag-aware too, and the cooldown holds the next ones off
+    /// without stopping them being counted.
+    #[test]
+    fn a_blocked_push_gives_quality_up_and_a_clear_link_takes_it_back() {
+        let start = Instant::now();
+        let mut walk = QualityWalk::new(40, CAPTURE, false);
+        assert_eq!(walk.observe(BEHIND_BLOCK, Duration::ZERO, start), None);
+        assert_eq!(walk.observe(BEHIND_BLOCK, Duration::ZERO, start), Some(Pace { quality: 30, interval: CAPTURE }));
+        assert_eq!(walk.observe(BEHIND_BLOCK, Duration::ZERO, start), None);
+        assert_eq!(walk.observe(BEHIND_BLOCK, Duration::ZERO, start), None);
+        let later = start + ADJUST_COOLDOWN;
+        assert_eq!(walk.observe(BEHIND_BLOCK, Duration::ZERO, later).map(|pace| pace.quality), Some(20));
+        let mut at = later + ADJUST_COOLDOWN;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            let (moved, then) = clear_pushes(&mut walk, CLEAR_RUN, at);
+            seen.extend(moved.map(|pace| pace.quality));
+            at = then + ADJUST_COOLDOWN;
+        }
+        assert_eq!(seen, [23, 29, 40], "the link recovered past the quality that was asked for");
+    }
+
     #[test]
     fn a_link_far_behind_gives_up_more_at_once() {
         let start = Instant::now();
         let mut heavy = walk(90, start);
         heavy.fenced(40 * MS + LAG_HEAVY, true, start);
-        assert_eq!(heavy.fenced(40 * MS + LAG_HEAVY, true, start), Some(Pace { quality: 70, interval: Duration::ZERO }));
+        assert_eq!(heavy.fenced(40 * MS + LAG_HEAVY, true, start), Some(Pace { quality: 70, interval: CAPTURE }));
         let mut severe = walk(90, start);
         severe.fenced(40 * MS + LAG_SEVERE, true, start);
         assert_eq!(severe.fenced(40 * MS + LAG_SEVERE, true, start), Some(Pace { quality: 60, interval: CAPTURE * 2 }));
+        // The push blocking that long is the same verdict, on a walk that is
+        // not lag-aware too.
+        let mut blocked = QualityWalk::new(90, CAPTURE, false);
+        blocked.observe(LAG_SEVERE, Duration::ZERO, start);
+        assert_eq!(blocked.observe(LAG_SEVERE, Duration::ZERO, start), Some(Pace { quality: 60, interval: CAPTURE * 2 }));
     }
 
     #[test]
@@ -532,9 +643,9 @@ mod tests {
         let (moved, at) = clear(&mut walk, CLEAR_RUN, at);
         assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR, interval: CAPTURE * 2 }));
         let (moved, at) = clear(&mut walk, CLEAR_RUN, at + ADJUST_COOLDOWN);
-        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR, interval: Duration::ZERO }));
+        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR, interval: CAPTURE }));
         let (moved, _) = clear(&mut walk, CLEAR_RUN, at + ADJUST_COOLDOWN);
-        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR + STEP_UP, interval: Duration::ZERO }));
+        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR + STEP_UP, interval: CAPTURE }));
     }
 
     #[test]
@@ -558,6 +669,7 @@ mod tests {
         at = then + ADJUST_COOLDOWN;
         walk.fenced(140 * MS, true, at);
         assert_eq!(walk.fenced(140 * MS, true, at).map(|pace| pace.quality), Some(63));
+        assert_eq!(walk.refused.map(|(cap, _)| cap), Some(66));
         // Back up to 66, halfway, and no further, however clear the link — five
         // spells, well inside the hold.
         let mut seen = Vec::new();
@@ -619,6 +731,7 @@ mod tests {
         let soon = at + REFUSAL_COOLDOWN;
         walk.fenced(140 * MS, true, soon);
         assert_eq!(walk.fenced(140 * MS, true, soon).map(|pace| pace.quality), Some(80));
+        assert_eq!(walk.refused.map(|(cap, _)| cap), Some(81));
     }
 
     /// A settle after a step up is the last move: the frames behind its picture
@@ -673,7 +786,16 @@ mod tests {
             at += 250 * MS;
             moved = walk.fenced(40 * MS, true, at).or(moved);
         }
-        assert_eq!(moved, Some(Pace { quality: 60, interval: Duration::ZERO }));
+        assert_eq!(moved, Some(Pace { quality: 60, interval: CAPTURE }));
+        // But four inside a quarter second are not a second of evidence.
+        let mut fresh = self::walk(90, start);
+        fresh.fenced(140 * MS, true, start);
+        fresh.fenced(140 * MS, true, start);
+        let mut at = start + ADJUST_COOLDOWN;
+        for _ in 0..CLEAR_FRAMES * 2 {
+            at += 20 * MS;
+            assert_eq!(fresh.fenced(40 * MS, true, at), None);
+        }
     }
 
     #[test]
@@ -701,6 +823,17 @@ mod tests {
             assert_eq!(walk.fenced(85 * MS, true, start + ADJUST_COOLDOWN + i * 50 * MS), None);
         }
         assert_eq!(walk.quality(), 50);
+        // The same band on a lag already floored.
+        let mut walk = QualityWalk::new(30, CAPTURE, true);
+        walk.observe(BEHIND_BLOCK, Duration::ZERO, start);
+        assert_eq!(walk.observe(BEHIND_BLOCK, Duration::ZERO, start).map(|pace| pace.quality), Some(20));
+        let hover = LAG_CLEAR + (LAG_BEHIND - LAG_CLEAR) / 2;
+        let mut at = start;
+        for _ in 0..CLEAR_RUN * 4 {
+            at += ADJUST_COOLDOWN;
+            assert_eq!(walk.observe(Duration::ZERO, hover, at), None);
+        }
+        assert_eq!(walk.quality(), 20, "a hovering link earned quality back");
     }
 
     #[test]
@@ -761,15 +894,17 @@ mod tests {
     }
 
     /// A client that asked for its dial held gets a walk that is not
-    /// lag-aware: its fences say nothing, however late, and only a blocked
-    /// write — pressure, the walk's historical shape — moves it, whether or
-    /// not a fence follows the write.
+    /// lag-aware: its fences and its paint window say nothing, however late,
+    /// and only a blocked write — pressure, the walk's historical shape —
+    /// moves it, whether or not a fence follows the write.
     #[test]
-    fn a_walk_that_is_not_lag_aware_hears_nothing_in_a_fence() {
+    fn a_walk_that_is_not_lag_aware_hears_nothing_but_pressure() {
         let start = Instant::now();
         let mut walk = QualityWalk::new(60, CAPTURE, false);
+        assert!(!walk.lag_aware());
         for _ in 0..8 {
             assert_eq!(walk.fenced(400 * MS, true, start), None);
+            assert_eq!(walk.observe(Duration::ZERO, LAG_BEHIND * 4, start), None);
         }
         assert_eq!(walk.quality(), 60);
         assert_eq!(walk.written(80 * MS, true, start), None);
@@ -777,6 +912,28 @@ mod tests {
         let mut walk = QualityWalk::new(60, CAPTURE, false);
         assert_eq!(walk.written(80 * MS, false, start), None);
         assert_eq!(walk.written(80 * MS, false, start).map(|pace| pace.quality), Some(50));
+    }
+
+    /// A lag-aware walk gives quality up on the client's lag alone: the push
+    /// never blocked, which is the case a paint window measures.
+    #[test]
+    fn a_lag_aware_walk_gives_up_quality_on_lag_alone() {
+        let start = Instant::now();
+        let mut walk = QualityWalk::new(30, CAPTURE, true);
+        assert_eq!(walk.observe(Duration::ZERO, LAG_BEHIND, start), None);
+        assert_eq!(walk.observe(Duration::ZERO, LAG_BEHIND, start).map(|pace| pace.quality), Some(20));
+    }
+
+    /// An encoder that refused a move leaves the walk where the encoder is.
+    #[test]
+    fn a_walk_stands_where_the_encoder_stayed() {
+        let start = Instant::now();
+        let mut walk = QualityWalk::new(60, CAPTURE, true);
+        walk.observe(BEHIND_BLOCK, Duration::ZERO, start);
+        assert_eq!(walk.observe(BEHIND_BLOCK, Duration::ZERO, start).map(|pace| pace.quality), Some(50));
+        walk.stays_at(60);
+        assert_eq!(walk.quality(), 60);
+        assert!(!walk.coarse(walk.quality()));
     }
 
     #[test]
@@ -805,6 +962,6 @@ mod tests {
             at = then + ADJUST_COOLDOWN;
         }
         // Three runs take the frames back, then two steps up: three, then six.
-        assert_eq!(moved.last(), Some(&Pace { quality: QUALITY_FLOOR + 3 * STEP_UP, interval: Duration::ZERO }));
+        assert_eq!(moved.last(), Some(&Pace { quality: QUALITY_FLOOR + 3 * STEP_UP, interval: CAPTURE }));
     }
 }

@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 wlshare-rfb = { path = "../wlshare-rfb", features = ["encode"] }
+# The quality walk, the same one the remotex gateway runs on its own streams.
+wlshare-vp9 = { path = "../wlshare-vp9" }
 anyhow.workspace = true
 log.workspace = true
 thiserror.workspace = true
