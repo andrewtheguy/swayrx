@@ -1186,12 +1186,14 @@ impl Session {
 
         self.out.clear();
         self.out.extend_from_slice(&msg::update_header(pieces.len() as u16));
-        // Whether the update is a VP9 frame, and if so whether its delivery is
-        // a verdict about the link: a delta frame at the walk's quality. The
-        // settle's frame is at the ceiling, for the rounds after it to leave.
+        // Whether the update is a VP9 frame, and if so whether it is a keyframe
+        // and whether its delivery is a verdict about the link: a delta frame at
+        // the walk's quality. The settle's frame is at the ceiling, for the
+        // rounds after it to leave.
         let settling = self.use_vp9 && self.settle_owed;
-        let verdict = if self.use_vp9 {
-            Some(!self.encode_vp9(full, settling)? && !settling)
+        let vp9 = if self.use_vp9 {
+            let keyframe = self.encode_vp9(full, settling)?;
+            Some((keyframe, !keyframe && !settling))
         } else {
             self.encode_pieces(&pieces);
             None
@@ -1203,12 +1205,12 @@ impl Session {
         }
         let sent = Instant::now();
         writer.send(&self.out).await.context("writing an update")?;
-        if let Some(verdict) = verdict {
+        if let Some((keyframe, verdict)) = vp9 {
             // Judged by the quality the frame was encoded at, which is what the
             // client is holding: the ceiling for a settle, whatever the walk holds.
             let quality = if settling { self.config.vp9_quality } else { self.vp9.as_ref().expect("a VP9 frame was encoded").quality() };
-            if !verdict && !settling {
-                // A keyframe: the frames behind it queue behind its crossing.
+            if keyframe {
+                // The frames behind it queue behind its crossing, a settle's too.
                 self.walk.keyframe(sent);
             }
             self.coarse_since = self.walk.coarse(quality).then_some(sent);
@@ -1216,7 +1218,7 @@ impl Session {
             let interval = self.walk.interval();
             self.frame_after = (!interval.is_zero()).then(|| sent + interval);
         }
-        match verdict {
+        match vp9.map(|(_, verdict)| verdict) {
             Some(verdict) if self.fence_supported => self.vp9_in_flight = Some((sent, verdict)),
             Some(verdict) => {
                 let now = Instant::now();

@@ -291,7 +291,13 @@ impl QualityWalk {
         }
         // Walking back a step up the link refused does not wait out the full
         // cooldown: the refusal is in the next few frames, and every one is queue.
-        let cooldown = if behind && self.reclaimed.is_some() { REFUSAL_COOLDOWN } else { ADJUST_COOLDOWN };
+        // Only while that step is the last move, though: a settle after it is a
+        // move too, and the frames behind its picture are owed the full cooldown.
+        let cooldown = if behind && self.reclaimed.is_some_and(|(_, at)| self.changed_at == Some(at)) {
+            REFUSAL_COOLDOWN
+        } else {
+            ADJUST_COOLDOWN
+        };
         if self.changed_at.is_some_and(|at| now.saturating_duration_since(at) < cooldown) {
             return None;
         }
@@ -579,6 +585,23 @@ mod tests {
         let soon = at + REFUSAL_COOLDOWN;
         walk.fenced(140 * MS, true, soon);
         assert_eq!(walk.fenced(140 * MS, true, soon).map(|pace| pace.quality), Some(80));
+    }
+
+    /// A settle after a step up is the last move: the frames behind its picture
+    /// wait out the full cooldown, not the refusal's.
+    #[test]
+    fn a_settle_after_a_step_up_restores_the_full_cooldown() {
+        let start = Instant::now();
+        let mut walk = walk(90, 20, start);
+        walk.fenced(140 * MS, true, start);
+        assert_eq!(walk.fenced(140 * MS, true, start).map(|pace| pace.quality), Some(80));
+        let (moved, at) = clear(&mut walk, CLEAR_RUN, start + ADJUST_COOLDOWN);
+        assert_eq!(moved.map(|pace| pace.quality), Some(83));
+        walk.settle(at + 33 * MS);
+        let soon = at + 33 * MS + REFUSAL_COOLDOWN;
+        walk.fenced(140 * MS, true, soon);
+        assert_eq!(walk.fenced(140 * MS, true, soon), None, "the settle's frames were walked back on the refusal's cooldown");
+        assert_eq!(walk.quality(), 83);
     }
 
     #[test]
