@@ -842,13 +842,18 @@ pub fn frame_header(frame: &[u8]) -> Option<FrameHeader> {
 /// `vp9/encoder/vp9_encoder.c` at the commit `libvpx-prebuilt` pins, and not
 /// from memory: the table is the normative one, the rows are not evenly spaced,
 /// and 4K30 lands on level 5.0 rather than the 5.1 a plausible guess gives. Only
-/// the three fields a picture size can violate are kept — the rest of each row
-/// is about bitrate, buffer size and tiling, none of which decides the level of
-/// a stream whose quantizer is pinned.
+/// the three fields a picture size decides are kept. A level also caps the
+/// bitrate, the buffer size and the compression ratio, and a pinned quantizer
+/// holds none of those: a busy frame costs what it costs, and it is the quality
+/// walk behind the encoder, not a level, that keeps the stream inside the link.
+/// So the level announced is the picture's, which is what a browser reads it
+/// for: it picks a decoder by profile and size, and it refuses a string whose
+/// level is not one of the fourteen — Chromium's parser rejects the "undefined"
+/// 0 the file-format binding allows — so a level must be named.
 ///
 /// The lowest row a picture fits is the level announced, which matters because
 /// a level is a ceiling: a decoder that accepts 5.0 accepts every stream below
-/// it, so announcing the smallest true level is the widest claim that is honest.
+/// it, so the smallest level the picture fits is the widest claim to make.
 const LEVELS: [(u8, u64, u32, u16); 14] = [
     (10, 829_440, 36_864, 512),
     (11, 2_764_800, 73_728, 768),

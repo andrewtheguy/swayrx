@@ -124,14 +124,24 @@ impl Vp9Encoder {
     /// Encode the picture — [`Self::size`] of `B, G, R, X` pixels whose rows
     /// are `stride` bytes apart — and append the rectangle's body to `out`: the
     /// length word and the frame. `keyframe` makes it one a decoder can start
-    /// from; an encoder's first frame is one either way.
-    pub fn encode_rect(&mut self, pixels: &[u8], stride: usize, keyframe: bool, out: &mut Vec<u8>) -> Result<(), Vp9Error> {
+    /// from; an encoder's first frame is one either way. Returns whether a body
+    /// was appended: `false`, with `out` as it was, when the encoder produced no
+    /// frame, since an empty rectangle is not a frame a client can decode and
+    /// the pixels are the next frame's to carry.
+    pub fn encode_rect(&mut self, pixels: &[u8], stride: usize, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
         self.picture.read_bgrx(pixels, stride)?;
         let length_at = out.len();
         out.extend_from_slice(&[0; 4]);
-        if let Err(e) = self.encoder.encode(&self.picture, keyframe, out) {
-            out.truncate(length_at);
-            return Err(e.into());
+        match self.encoder.encode(&self.picture, keyframe, out) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                out.truncate(length_at);
+                return Ok(false);
+            }
+            Err(e) => {
+                out.truncate(length_at);
+                return Err(e.into());
+            }
         }
         let len = out.len() - length_at - 4;
         if len > crate::client::MAX_RECT_BODY {
@@ -139,7 +149,7 @@ impl Vp9Encoder {
             return Err(Vp9Error::FrameTooLong(len));
         }
         out[length_at..length_at + 4].copy_from_slice(&(len as u32).to_be_bytes());
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -204,7 +214,7 @@ mod tests {
     fn encode(encoder: &mut Vp9Encoder, pixels: &[u8], keyframe: bool) -> Vec<u8> {
         let (width, _) = encoder.size();
         let mut out = vec![0xEE];
-        encoder.encode_rect(pixels, usize::from(width) * 4, keyframe, &mut out).expect("an encode");
+        assert!(encoder.encode_rect(pixels, usize::from(width) * 4, keyframe, &mut out).expect("an encode"), "a frame");
         assert_eq!(out[0], 0xEE, "appended, not overwritten");
         let len = u32::from_be_bytes(out[1..5].try_into().unwrap()) as usize;
         assert_eq!(len, out.len() - 5, "the length word is the frame's");

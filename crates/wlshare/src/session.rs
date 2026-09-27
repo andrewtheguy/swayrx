@@ -1203,7 +1203,13 @@ impl Session {
         // rounds after it to leave.
         let settling = self.use_vp9 && self.settle_owed;
         let vp9 = if self.use_vp9 {
-            let keyframe = self.encode_vp9(full, settling)?;
+            let Some(keyframe) = self.encode_vp9(full, settling)? else {
+                // Nothing to send, and nothing changes hands: the damage stays
+                // unseen, the request pending and the keyframe owed, for the
+                // frame the next change brings.
+                warn!("client {}: the VP9 encoder produced no frame; waiting for the next change", self.id.0);
+                return Ok(());
+            };
             Some((keyframe, !keyframe && !settling))
         } else {
             self.encode_pieces(&pieces);
@@ -1250,16 +1256,19 @@ impl Session {
 
     /// The whole framebuffer, copied into `scratch`, as the next frame of the
     /// VP9 stream: a keyframe when the update is a full one or one is owed.
-    /// Returns whether it was one. A `settling` frame is coded at the
-    /// configured quality, with the encoder returned to the walk's after it —
-    /// a retune and not a rebuild either way, so no keyframe is spent on it.
-    fn encode_vp9(&mut self, full: bool, settling: bool) -> anyhow::Result<bool> {
+    /// Returns whether it was one, or `None` when the encoder produced no
+    /// frame: `out` is left as it was, and so is the keyframe owed. A
+    /// `settling` frame is coded at the configured quality, with the encoder
+    /// returned to the walk's after it — a retune and not a rebuild either way,
+    /// so no keyframe is spent on it.
+    fn encode_vp9(&mut self, full: bool, settling: bool) -> anyhow::Result<Option<bool>> {
         let (width, height) = self.known_size;
         if self.vp9.as_ref().is_none_or(|encoder| encoder.size() != (width, height)) {
             let encoder = Vp9Encoder::new(width, height, self.walk.quality())
                 .with_context(|| format!("starting a VP9 stream for a {width}x{height} desktop"))?;
             self.vp9 = Some(encoder);
         }
+        let rect_at = self.out.len();
         self.out.extend_from_slice(&msg::rect_header(0, 0, width, height, ENCODING_VP9));
         let (encoder, pixels, out) = (self.vp9.as_mut().expect("made above"), &self.scratch, &mut self.out);
         let keyframe = full || self.keyframe_owed;
@@ -1273,9 +1282,12 @@ impl Session {
         if settling {
             encoder.set_quality(self.walk.quality()).context("returning the VP9 quality after a settle")?;
         }
-        encoded?;
+        if !encoded? {
+            self.out.truncate(rect_at);
+            return Ok(None);
+        }
         self.keyframe_owed = false;
-        Ok(keyframe)
+        Ok(Some(keyframe))
     }
 
     /// When a frame the walk slowed may go out, or `None` when the next frame
