@@ -19,7 +19,7 @@
 //! them and stop short of a quality it refused, so a link that is
 //! intermittently bad settles at a quality it can hold rather than oscillating
 //! around one it cannot. Two knobs in a fixed order: quality down to the floor,
-//! then the frame interval doubled up to [`SLOW_MAX`] times; frames back first
+//! then the frame interval doubled up to `SLOW_MAX` times; frames back first
 //! and quality after. The dial rather than a quantizer, because a quantizer is
 //! the codec's own scale and the mapping lives with the encoder.
 //!
@@ -61,7 +61,7 @@ const LAG_HEAVY: Duration = Duration::from_millis(150);
 const LAG_SEVERE: Duration = Duration::from_millis(400);
 
 /// Queueing below which a frame counts as clear. Between this and
-/// [`LAG_BEHIND`] is hysteresis: a link hovering there earns neither a coarser
+/// `LAG_BEHIND` is hysteresis: a link hovering there earns neither a coarser
 /// picture nor its quality back.
 pub const LAG_CLEAR: Duration = Duration::from_millis(30);
 
@@ -403,7 +403,7 @@ impl QualityWalk {
         self.reclaimed = None;
     }
 
-    /// A keyframe went out: the verdicts wait [`KEYFRAME_HOLD`] for it to
+    /// A keyframe went out: the verdicts wait `KEYFRAME_HOLD` for it to
     /// cross the link, and start over after it.
     pub fn keyframe(&mut self, now: Instant) {
         self.verdicts = 0;
