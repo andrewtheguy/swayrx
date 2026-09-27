@@ -554,6 +554,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-vp9"
+version = "0.0.1"
+source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.1#08db134086a6037ef68210e48193aa5ed22c3d3e"
+dependencies = [
+ "libvpx-prebuilt-sys",
+ "log",
+ "thiserror",
+ "yuv",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1753,6 +1764,7 @@ dependencies = [
  "calloop",
  "calloop-wayland-source",
  "clap",
+ "desktop-vp9",
  "env_logger",
  "ffmpeg-sys-next",
  "libc",
@@ -1769,7 +1781,6 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wlshare-rfb",
- "wlshare-vp9",
  "xkbcommon",
 ]
 
@@ -1789,6 +1800,7 @@ name = "wlshare-rfb"
 version = "0.0.41"
 dependencies = [
  "aes",
+ "desktop-vp9",
  "eax",
  "flacenc",
  "flate2",
@@ -1803,17 +1815,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "wlshare-rfb",
- "wlshare-vp9",
-]
-
-[[package]]
-name = "wlshare-vp9"
-version = "0.0.41"
-dependencies = [
- "libvpx-prebuilt-sys",
- "log",
- "thiserror",
- "yuv",
 ]
 
 [[package]]

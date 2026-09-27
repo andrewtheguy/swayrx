@@ -1,13 +1,14 @@
 # The daemon, the protocol crate it is built on, and the desktop client's
 # session the macOS and Windows apps are built on (see docs/architecture.md).
+# The VP9 coding under all three is desktop-vp9, its own repository.
 #
 # `default-members` deliberately omits the daemon: it needs libwayland and
 # libxkbcommon and only runs against a Wayland compositor, so a bare
 # `cargo test` on a development machine of any OS exercises the protocol crate
 # and the client and nothing else. Build the daemon explicitly with `-p wlshare`.
 [workspace]
-members = ["crates/wlshare-vp9", "crates/wlshare-rfb", "crates/wlshare-client", "crates/wlshare"]
-default-members = ["crates/wlshare-vp9", "crates/wlshare-rfb", "crates/wlshare-client"]
+members = ["crates/wlshare-rfb", "crates/wlshare-client", "crates/wlshare"]
+default-members = ["crates/wlshare-rfb", "crates/wlshare-client"]
 resolver = "3"
 
 [workspace.package]
