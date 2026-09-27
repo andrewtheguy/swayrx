@@ -243,9 +243,13 @@ impl QualityWalk {
     /// with one frame: the walk keeps its place, since the screen stopping
     /// says nothing about the link, and starts its verdicts over from here
     /// with the cooldown restarted like any other move, so the frames queued
-    /// behind that one large picture are not read as the link giving way.
+    /// behind that one large picture are not read as the link giving way. The
+    /// clear run starts over too: the quiet is no evidence of room, and a run
+    /// that spanned it would take quality back on the first frame of every
+    /// burst.
     pub fn settle(&mut self, now: Instant) {
         self.verdicts = 0;
+        self.clear = None;
         self.changed_at = Some(now);
         self.stepped_on = None;
     }
@@ -648,6 +652,27 @@ mod tests {
         assert_eq!(walk.fenced(140 * MS, true, start + 1300 * MS), None, "the settle was a move");
         // Counted all the same: the cooldown over, the verdict is already in.
         assert_eq!(walk.fenced(140 * MS, true, start + 2300 * MS).map(|pace| pace.quality), Some(40));
+    }
+
+    /// The clear frames before a desktop went quiet do not span the quiet: a
+    /// burst of motion after a settle earns its step back up from its own frames.
+    #[test]
+    fn a_settle_starts_the_clear_run_over() {
+        let start = Instant::now();
+        let mut walk = walk(60, 20, start);
+        walk.fenced(140 * MS, true, start);
+        assert_eq!(walk.fenced(140 * MS, true, start).map(|pace| pace.quality), Some(50));
+        // Three clear frames, the cooldown over, and then the desktop goes quiet.
+        let (moved, at) = clear(&mut walk, CLEAR_FRAMES - 1, start + ADJUST_COOLDOWN);
+        assert_eq!(moved, None);
+        walk.settle(at + 5000 * MS);
+        // The first frame of the next burst, a clear span and more after those
+        // three, does not make the fourth.
+        let at = at + 5000 * MS + ADJUST_COOLDOWN;
+        assert_eq!(walk.fenced(40 * MS, true, at), None, "the quiet was counted as clear");
+        // Its own run is what takes quality back.
+        let (moved, _) = clear(&mut walk, CLEAR_RUN, at);
+        assert_eq!(moved.map(|pace| pace.quality), Some(50 + STEP_UP));
     }
 
     #[test]

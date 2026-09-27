@@ -300,9 +300,12 @@ fixed:
   walk's quality after it, and the frame is no verdict: the screen stopping
   says nothing about the link, and a walk that started every burst of motion
   from the ceiling was measured to put the picture half a second behind at
-  every one. A frame that went out at `vp9_quality` owes nothing, and a
-  desktop that goes quiet after one sends nothing. remotex's settle for its
-  own whole-desktop streams.
+  every one. The clear frames before the quiet do not span it either: the
+  walk's run of clear frames starts over at the settle, so a burst earns its
+  step back up from its own frames rather than taking one on its first. A
+  frame that went out at `vp9_quality` owes nothing, and a desktop that goes
+  quiet after one sends nothing. remotex's settle for its own whole-desktop
+  streams.
 - **Keyframes only when a decoder needs one**: the first frame after the
   encoding is listed, the first at a new size (the encoder is made again for
   it), and the frame that answers a non-incremental request. There is no
