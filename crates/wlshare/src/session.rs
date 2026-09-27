@@ -131,7 +131,7 @@ use wlshare_rfb::msg::{self, ClientMsg, Screen};
 use wlshare_rfb::outputs::output_list;
 use wlshare_rfb::pixel::PixelFormat;
 use wlshare_rfb::rsa_aes::{self, FrameReader, Sealer, ServerKey};
-use wlshare_rfb::vp9::Vp9Encoder;
+use wlshare_rfb::vp9::{Chroma, Vp9Encoder, Vp9Stream};
 use wlshare_rfb::zrle::{ZrleEncoder, encode_raw_rect};
 use wlshare_rfb::{
     ENCODING_AUDIO, ENCODING_CAMERA, ENCODING_CONTINUOUS_UPDATES, ENCODING_DENSITY, ENCODING_DESKTOP_SIZE, ENCODING_EXTENDED_DESKTOP_SIZE, ENCODING_FENCE, ENCODING_MICROPHONE,
@@ -249,7 +249,8 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
 
     let events = shared.events.subscribe();
     let frames = shared.frame_tx.subscribe();
-    let walk = QualityWalk::new(config.vp9_quality, config.capture);
+    let stream = Vp9Stream { chroma: Chroma::Full, quality: config.vp9_quality, adaptive: true };
+    let walk = QualityWalk::new(stream.quality, config.capture, stream.adaptive);
     let mut session = Session {
         id,
         shared,
@@ -259,6 +260,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
         use_zrle: false,
         vp9: None,
         use_vp9: false,
+        stream,
         keyframe_owed: false,
         walk,
         vp9_in_flight: None,
@@ -394,6 +396,11 @@ struct Session {
     vp9: Option<Vp9Encoder>,
     /// The client listed the VP9 encoding, which it then gets instead of ZRLE.
     use_vp9: bool,
+    /// What the VP9 stream is to be: its chroma, the ceiling of its quality
+    /// and whether the walk moves it below, as the client's list asks
+    /// ([`Vp9Stream`]). 4:4:4 at the configured quality, with the walk, for a
+    /// list that asks nothing — which is every desktop client's.
+    stream: Vp9Stream,
     /// The next VP9 frame must be a keyframe.
     keyframe_owed: bool,
     /// The VP9 quality this client's link will bear.
@@ -651,8 +658,34 @@ impl Session {
                     self.zrle = Some(ZrleEncoder::default());
                 }
                 let vp9 = has(ENCODING_VP9);
+                let stream = Vp9Stream::listed(&encodings, self.config.vp9_quality);
+                let changed = stream != self.stream;
+                if changed {
+                    // A new ceiling or walk is a fresh walk from the ceiling, which
+                    // a running encoder follows without a keyframe; a new chroma
+                    // is a new stream, which starts at one.
+                    let rechroma = stream.chroma != self.stream.chroma;
+                    self.stream = stream;
+                    self.walk = QualityWalk::new(stream.quality, self.config.capture, stream.adaptive);
+                    self.coarse_since = None;
+                    self.settle_owed = false;
+                    if rechroma {
+                        self.vp9 = None;
+                        self.keyframe_owed = true;
+                    } else if let Some(encoder) = &mut self.vp9 {
+                        encoder.set_quality(self.walk.quality()).context("moving the VP9 quality to the client's ceiling")?;
+                    }
+                }
+                if vp9 && (changed || !self.use_vp9) {
+                    info!(
+                        "client {}: asked for VP9, {} up to quality {}, {}",
+                        self.id.0,
+                        stream.chroma.name(),
+                        stream.quality,
+                        if stream.adaptive { "walked by its lag" } else { "held there" }
+                    );
+                }
                 if vp9 && !self.use_vp9 {
-                    info!("client {}: asked for VP9 at quality {}", self.id.0, self.walk.quality());
                     // A decoder that has seen nothing of this stream starts at a keyframe.
                     self.keyframe_owed = true;
                 } else if !vp9 && self.use_vp9 {
@@ -1225,7 +1258,7 @@ impl Session {
         if let Some((keyframe, _)) = vp9 {
             // Judged by the quality the frame was encoded at, which is what the
             // client is holding: the ceiling for a settle, whatever the walk holds.
-            let quality = if settling { self.config.vp9_quality } else { self.vp9.as_ref().expect("a VP9 frame was encoded").quality() };
+            let quality = if settling { self.stream.quality } else { self.vp9.as_ref().expect("a VP9 frame was encoded").quality() };
             if keyframe {
                 // The frames behind it queue behind its crossing, a settle's too.
                 self.walk.keyframe(sent);
@@ -1264,8 +1297,8 @@ impl Session {
     fn encode_vp9(&mut self, full: bool, settling: bool) -> anyhow::Result<Option<bool>> {
         let (width, height) = self.known_size;
         if self.vp9.as_ref().is_none_or(|encoder| encoder.size() != (width, height)) {
-            let encoder = Vp9Encoder::new(width, height, self.walk.quality())
-                .with_context(|| format!("starting a VP9 stream for a {width}x{height} desktop"))?;
+            let encoder = Vp9Encoder::new(width, height, self.stream.chroma, self.walk.quality())
+                .with_context(|| format!("starting a {} VP9 stream for a {width}x{height} desktop", self.stream.chroma.name()))?;
             self.vp9 = Some(encoder);
         }
         let rect_at = self.out.len();
@@ -1273,7 +1306,7 @@ impl Session {
         let (encoder, pixels, out) = (self.vp9.as_mut().expect("made above"), &self.scratch, &mut self.out);
         let keyframe = full || self.keyframe_owed;
         if settling {
-            encoder.set_quality(self.config.vp9_quality).context("moving the VP9 quality for a settle")?;
+            encoder.set_quality(self.stream.quality).context("moving the VP9 quality for a settle")?;
         }
         // Tens of milliseconds for a large desktop, which is the worker's to
         // spend and not the runtime's to wait on.
@@ -1326,7 +1359,7 @@ impl Session {
         debug!(
             "client {}: the desktop went quiet below VP9 quality {}; settling it there (motion stays at {})",
             self.id.0,
-            self.config.vp9_quality,
+            self.stream.quality,
             self.walk.quality()
         );
         self.coarse_since = None;

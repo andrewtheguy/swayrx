@@ -156,6 +156,10 @@ pub struct Pace {
 pub struct QualityWalk {
     /// The configured quality: the finest this ever asks for.
     ceiling: u8,
+    /// Whether the client's lag, as its fences report it, is a signal this
+    /// walk listens to. A client that asked for its dial held is not: the walk
+    /// keeps its historical shape, pressure only, and a fence teaches nothing.
+    lag_aware: bool,
     /// The interval the capture paces frames to, which a slowed link's is
     /// doubled from.
     capture: Duration,
@@ -193,10 +197,12 @@ pub struct QualityWalk {
 
 impl QualityWalk {
     /// A walk that starts at `ceiling` and goes down to [`QUALITY_FLOOR`], on a
-    /// capture paced to `capture`.
-    pub fn new(ceiling: u8, capture: Duration) -> Self {
+    /// capture paced to `capture`; `adaptive` is whether the client's lag moves
+    /// it, and without it only a blocked write does.
+    pub fn new(ceiling: u8, capture: Duration, adaptive: bool) -> Self {
         Self {
             ceiling,
+            lag_aware: adaptive,
             capture,
             quality: ceiling,
             slow: 0,
@@ -237,8 +243,12 @@ impl QualityWalk {
     /// is one — a delta frame at the walk's quality. A keyframe is the whole
     /// picture again and slow by its nature, and so is the settle's frame at
     /// the ceiling; the frames behind either carry any lag they cause. Returns
-    /// where the walk stands if the dial moved.
+    /// where the walk stands if the dial moved. Nothing, ever, on a walk that
+    /// is not lag-aware.
     pub fn fenced(&mut self, delivery: Duration, verdict: bool, now: Instant) -> Option<Pace> {
+        if !self.lag_aware {
+            return None;
+        }
         while self.recent.front().is_some_and(|(at, _)| now.saturating_duration_since(*at) > BASELINE_WINDOW) {
             self.recent.pop_front();
         }
@@ -413,7 +423,7 @@ mod tests {
 
     /// A walk that has learnt a 40 ms link floor from one clear delivery.
     fn walk(ceiling: u8, start: Instant) -> QualityWalk {
-        let mut walk = QualityWalk::new(ceiling, CAPTURE);
+        let mut walk = QualityWalk::new(ceiling, CAPTURE, true);
         assert_eq!(walk.fenced(40 * MS, true, start), None);
         walk
     }
@@ -663,7 +673,7 @@ mod tests {
     #[test]
     fn a_frame_that_is_no_verdict_can_still_teach_the_floor() {
         let start = Instant::now();
-        let mut walk = QualityWalk::new(60, CAPTURE);
+        let mut walk = QualityWalk::new(60, CAPTURE, true);
         for _ in 0..5 {
             assert_eq!(walk.fenced(400 * MS, false, start), None);
         }
@@ -726,7 +736,22 @@ mod tests {
     #[test]
     fn a_blocked_write_is_lag_without_a_floor() {
         let start = Instant::now();
-        let mut walk = QualityWalk::new(60, CAPTURE);
+        let mut walk = QualityWalk::new(60, CAPTURE, true);
+        assert_eq!(walk.written(80 * MS, start), None);
+        assert_eq!(walk.written(80 * MS, start).map(|pace| pace.quality), Some(50));
+    }
+
+    /// A client that asked for its dial held gets a walk that is not
+    /// lag-aware: its fences say nothing, however late, and only a blocked
+    /// write — pressure, the walk's historical shape — moves it.
+    #[test]
+    fn a_walk_that_is_not_lag_aware_hears_nothing_in_a_fence() {
+        let start = Instant::now();
+        let mut walk = QualityWalk::new(60, CAPTURE, false);
+        for _ in 0..8 {
+            assert_eq!(walk.fenced(400 * MS, true, start), None);
+        }
+        assert_eq!(walk.quality(), 60);
         assert_eq!(walk.written(80 * MS, start), None);
         assert_eq!(walk.written(80 * MS, start).map(|pace| pace.quality), Some(50));
     }
