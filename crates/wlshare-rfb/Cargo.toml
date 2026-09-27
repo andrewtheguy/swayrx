@@ -36,11 +36,11 @@ flacenc = { version = "0.5", default-features = false, optional = true }
 symphonia-bundle-flac = { version = "0.6", optional = true }
 symphonia-core = { version = "0.6", optional = true }
 # The VP9 encoding's codec: the one place libvpx is spoken to, for this
-# workspace and for the remotex gateway, which pulls it from this repository by
-# git. Not behind a feature, since what a client lists beside the encoding
+# workspace and for the remotex gateway, each pinned to its release tag. Not
+# behind a feature, since what a client lists beside the encoding
 # (`vp9::Vp9Stream`) names its chroma, and the daemon and the client both
 # take one of the features anyway.
-wlshare-vp9 = { path = "../wlshare-vp9" }
+desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.2" }
 
 [features]
 # The server's FLAC encoder, `audio::FlacEncoder`, and VP9 encoder,

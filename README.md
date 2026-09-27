@@ -108,12 +108,14 @@ the server resolves the client's keysyms through the same keymap it uploads.
 
 ## Building
 
-The workspace has four crates: `wlshare-vp9`, the VP9 coding shared with the
-remotex gateway, `wlshare-rfb`, the protocol, and `wlshare-client`, the session
-the macOS and Windows clients are built on, which all build and test anywhere,
-and `wlshare`, the daemon, which needs libwayland, libxkbcommon,
-libpipewire and libavcodec and only runs under a wlroots-based Wayland compositor. A bare
-`cargo test` covers the first three; build the daemon with
+The workspace has three crates: `wlshare-rfb`, the protocol, and
+`wlshare-client`, the session the macOS and Windows clients are built on, which
+both build and test anywhere, and `wlshare`, the daemon, which needs libwayland,
+libxkbcommon, libpipewire and libavcodec and only runs under a wlroots-based
+Wayland compositor. The VP9 coding under them is
+[desktop-vp9](https://github.com/andrewtheguy/desktop-vp9), shared with the
+remotex gateway and pinned by its release tag. A bare `cargo test` covers the
+first two; build the daemon with
 `cargo build --release -p wlshare` on a Linux host with `libwayland-dev`,
 `libxkbcommon-dev`, `libpam0g-dev`, `libpipewire-0.3-dev`, `libspa-0.2-dev`,
 `libavcodec-dev`, `libclang-dev` and `pkg-config`. libclang links nothing:

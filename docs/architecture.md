@@ -12,16 +12,17 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
                      data-control
 ```
 
-- `crates/wlshare-vp9` is the one place libvpx is spoken to, for this workspace
-  and for the remotex gateway, which pulls it from this repository by git: the
-  encoder configuration a desktop is coded with, the planes in front of it at
-  either chroma, the decoder, and what a frame says about itself. It has no
-  platform dependency, and a change to how a desktop is coded is made there
-  once for the daemon, the desktop client and the gateway. See
+- [desktop-vp9](https://github.com/andrewtheguy/desktop-vp9), a repository of
+  its own that this workspace and the remotex gateway each pin by release tag,
+  is the one place libvpx is spoken to: the encoder configuration a desktop is
+  coded with, the planes in front of it at either chroma, the decoder, what a
+  frame says about itself, and the quality walk. It has no platform dependency,
+  and a change to how a desktop is coded is made there once for the daemon, the
+  desktop client and the gateway, and reaches each as a pin bump. See
   [The VP9 encoding](#the-vp9-encoding).
 - `crates/wlshare-rfb` decides every byte on the wire: handshake, message parsing
   and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding's
-  framing over `wlshare-vp9`, the density, outputs, camera and microphone
+  framing over `desktop-vp9`, the density, outputs, camera and microphone
   extensions. It has no platform dependency and its tests decode every encoder's
   output with an independent decoder written from the RFC, and run the RSA-AES
   exchange against a client written from the specification.
@@ -248,7 +249,7 @@ u8[length]   one VP9 frame
 
 Successive rectangles are one stream, each frame coded against the ones before
 it, so a client decodes them all with one decoder, in order. The coding is
-`crates/wlshare-vp9`'s, which remotex encodes its own streams with as well, so
+desktop-vp9's, which remotex encodes its own streams with as well, so
 the two sides agree on every libvpx setting by construction: the quantizer
 pinned to the dial, screen-content tuning, no lag, no dropped frames, no
 keyframe that was not asked for, and the colour declared in the bitstream.
@@ -272,7 +273,7 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   dropped frames. A session starts at `vp9_quality` (90 by default, for the
   LAN wlshare mostly runs on), which is a ceiling it never goes above, and
   walks down to a floor of 20 while the client is behind — the one walk both
-  run, `crates/wlshare-vp9/src/walk.rs`. The floor is a constant, not a key, as
+  run, desktop-vp9's `walk`. The floor is a constant, not a key, as
   every adaptive stream's is: where WebRTC's quality scaler hands off from the
   quantizer to resolution and frame rate at its own threshold, this walk hands
   off to the frame rate, and the settle below sharpens a quiet desktop back at
@@ -362,8 +363,8 @@ fence keeps one frame in flight as it does any update. A `SetEncodings` that
 drops the encoding is answered with the whole framebuffer in ZRLE, since the
 client is holding a lossy picture.
 
-libvpx comes from `libvpx-prebuilt`'s static archive, behind the crate's
-`encode` and `decode` features.
+libvpx comes from `libvpx-prebuilt`'s static archive, through desktop-vp9, behind
+`wlshare-rfb`'s `encode` and `decode` features.
 
 ### The desktop client's paint
 
