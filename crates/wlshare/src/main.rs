@@ -228,6 +228,7 @@ async fn serve(
         name: config.name.clone(),
         resize: config.resize,
         vp9_quality: config.vp9_quality,
+        capture: std::time::Duration::from_secs_f64(1.0 / f64::from(config.max_fps)),
         audio: config.audio,
         camera: config.camera,
         microphone: config.microphone,

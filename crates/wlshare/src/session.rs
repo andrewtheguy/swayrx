@@ -184,6 +184,9 @@ pub struct SessionConfig {
     pub resize: bool,
     /// The VP9 encoding's finest quality, 1–100, where a session starts.
     pub vp9_quality: u8,
+    /// The interval the capture is paced to, one over `max_fps`: what a
+    /// slowed link's frames are spaced from ([`QualityWalk::interval`]).
+    pub capture: Duration,
     /// Whether the audio extension is announced and served.
     pub audio: bool,
     /// Whether the camera extension is announced and served.
@@ -246,7 +249,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
 
     let events = shared.events.subscribe();
     let frames = shared.frame_tx.subscribe();
-    let walk = QualityWalk::new(config.vp9_quality);
+    let walk = QualityWalk::new(config.vp9_quality, config.capture);
     let mut session = Session {
         id,
         shared,
@@ -1064,7 +1067,7 @@ impl Session {
     /// Send pixels if the client wants some and something has changed.
     async fn maybe_update(&mut self, writer: &mut Writer) -> anyhow::Result<()> {
         let wants = self.continuous || self.pending.is_some();
-        if !wants || self.fence_outstanding || self.frame_at().is_some() {
+        if !wants || self.fence_outstanding {
             return Ok(());
         }
         // The cursor, ExtendedDesktopSize and audio announcements are updates like any
@@ -1099,6 +1102,13 @@ impl Session {
                 this.pending = None;
             }
         };
+        // A slowed link's frame waits for its turn; the announcements above do
+        // not, since none of them is a frame. A cursor or a resize a quarter of
+        // a second late is the one lag the walk is not there to add.
+        if self.frame_at().is_some() {
+            answered(self);
+            return Ok(());
+        }
 
         // Under the lock: decide, and copy the pixels out. Encoding happens after.
         let mut pieces: Vec<Piece> = Vec::new();

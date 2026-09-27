@@ -266,8 +266,9 @@ fixed:
   that floor but is no verdict. Without Fence it is how long writing the frame blocked. Two
   behind frames (60 ms of queueing or more) among the last four give quality
   up: ten points, twenty at 150 ms, thirty at 400 ms; once the dial is on the
-  floor the frame interval doubles instead, 33 ms up to 267, and at 400 ms
-  both go at once. A step is taken at most once a second, and while the lag
+  floor the capture's frame interval doubles instead, 33 ms up to 133 at the
+  default `max_fps`, and at 400 ms both go at once. The cursor, a resize and
+  the audio announcement never wait for a slowed frame's turn. A step is taken at most once a second, and while the lag
   is still falling a fifth per second from the step before — the queue it
   left draining — no further step is taken, since the step was enough; after
   a keyframe the verdicts wait two seconds, since the frames behind it queue
