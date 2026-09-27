@@ -20,8 +20,9 @@
 //! - **ZRLE, and VP9 for a client that lists it.** ZRLE is the standard's best
 //!   lossless encoding, every client worth naming decodes it, and the remotex
 //!   gateway asks for it first. **The VP9 encoding** is a private one for
-//!   wlshare's own desktop clients: the whole framebuffer as one 4:4:4 VP9
-//!   stream at a quality its owner sets ([`vp9`]), for a desktop that moves. Raw is
+//!   wlshare's own desktop clients and the gateway: the whole framebuffer as one
+//!   VP9 stream, 4:4:4 at a quality its owner sets unless the client asked for
+//!   otherwise ([`vp9`]), for a desktop that moves. Raw is
 //!   produced only before the client's first `SetEncodings`, where the RFC
 //!   requires it, and for a client whose list names neither. Tight, Hextile,
 //!   RRE, CopyRect and every other lossy encoding are absent.
@@ -84,7 +85,7 @@ pub const ENCODING_RAW: i32 = 0;
 pub const ENCODING_ZRLE: i32 = 16;
 /// The VP9 encoding, the ASCII bytes `WLSV`: a client that lists it is sent
 /// every picture as one rectangle over the whole framebuffer, a frame of one
-/// 4:4:4 VP9 stream ([`vp9`]). It wins over ZRLE wherever it is listed.
+/// VP9 stream ([`vp9`]). It wins over ZRLE wherever it is listed.
 pub const ENCODING_VP9: i32 = 0x574c_5356;
 /// DesktopSize pseudo-encoding: a rectangle announcing the framebuffer's new size.
 pub const ENCODING_DESKTOP_SIZE: i32 = -223;

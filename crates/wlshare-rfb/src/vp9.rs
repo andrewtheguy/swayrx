@@ -16,15 +16,19 @@
 //! able to start from: the first after the encoding is listed, the first at a
 //! new framebuffer size, and the one that answers a non-incremental request.
 //!
-//! **Fixed.** Every frame is 8-bit **4:4:4** (profile 1) — a colour sample per
-//! pixel, since the loss 4:2:0 costs a desktop is its text's colour and not its
-//! edges — converted from the framebuffer as BT.601 at studio swing, which the
-//! keyframe header says so a decoder does not guess. The quantizer is pinned by
-//! a 1–100 quality dial, which only the encoder's owner moves
-//! ([`Vp9Encoder::set_quality`]): no bitrate, no adaptive quantization, no
-//! dropped frames, so every frame is sent at exactly the dial's quality at the
-//! time. The client's pixel format does not apply to this encoding; what it
-//! decodes to is its own business, and [`Vp9Decoder`] writes `B, G, R, X`.
+//! **What a frame holds.** Every frame is 8-bit VP9 converted from the
+//! framebuffer as BT.601 at studio swing, which the keyframe header says so a
+//! decoder does not guess. Its chroma is **4:4:4** (profile 1) — a colour sample
+//! per pixel, since the loss 4:2:0 costs a desktop is its text's colour and not
+//! its edges — unless the client listed [`ENCODING_VP9_SUBSAMPLED`] beside the
+//! encoding ([`Vp9Stream`]), which the remotex gateway does for a browser whose
+//! decoder takes only profile 0; wlshare's own desktop clients never do, and
+//! [`Vp9Decoder`] takes 4:4:4 alone. The quantizer is pinned by a 1–100 quality dial, which only the
+//! encoder's owner moves ([`Vp9Encoder::set_quality`]): no bitrate, no adaptive
+//! quantization, no dropped frames, so every frame is sent at exactly the
+//! dial's quality at the time. The client's pixel format does not apply to this
+//! encoding; what it decodes to is its own business, and [`Vp9Decoder`] writes
+//! `B, G, R, X`.
 //!
 //! The coding itself is [`wlshare_vp9`]'s, the one place libvpx is spoken to
 //! for wlshare and for the remotex gateway alike, behind `encode` on the
@@ -34,10 +38,74 @@
 
 use thiserror::Error;
 
-pub use wlshare_vp9::{QUALITY_MAX, QUALITY_MIN};
+pub use wlshare_vp9::{Chroma, QUALITY_MAX, QUALITY_MIN};
 
-#[cfg(any(feature = "encode", feature = "decode"))]
-use wlshare_vp9::Chroma;
+/// Listed beside [`crate::ENCODING_VP9`], asks for the stream at 4:2:0 (VP9
+/// profile 0) in place of 4:4:4: the ASCII bytes `WLS0`. The remotex gateway
+/// lists it for a browser whose decoder takes only profile 0; wlshare's own
+/// desktop clients never do, and [`Vp9Decoder`] takes 4:4:4 alone.
+pub const ENCODING_VP9_SUBSAMPLED: i32 = 0x574c_5330;
+
+/// Listed beside [`crate::ENCODING_VP9`] with a quality 1–100 added, names the
+/// ceiling the stream's walk never goes above, in place of the server's
+/// `vp9_quality`: the ASCII bytes `WLQ` and the value, the way Tight's quality
+/// levels ride `SetEncodings`. A value outside the dial is not one of these.
+pub const ENCODING_VP9_QUALITY_BASE: i32 = 0x574c_5100;
+
+/// Listed beside [`crate::ENCODING_VP9`], holds the dial at its ceiling: the
+/// ASCII bytes `WLSD`. The walk then hears nothing in a fence, and only a
+/// blocked write moves it.
+pub const ENCODING_VP9_HELD: i32 = 0x574c_5344;
+
+/// What the client wants the VP9 stream to be, read from its `SetEncodings`:
+/// the three pseudo-encodings above, beside the encoding itself. Pseudo-encodings
+/// rather than a message because a server that is not wlshare ignores an
+/// encoding it does not know, where a message it does not know ends the
+/// connection; and they ride the very list that names the encoding, so the first
+/// frame is already what was asked for. The remotex gateway lists them from the
+/// target's own keys, so that those keys mean on a passed stream what they mean
+/// on one the gateway codes itself; wlshare's own desktop clients list none, and
+/// a list without them is 4:4:4 at the server's `vp9_quality`, with the walk.
+///
+/// A change of chroma starts the stream over at a keyframe; a change of quality
+/// or of the walk moves the running encoder's dial without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vp9Stream {
+    pub chroma: Chroma,
+    pub quality: u8,
+    pub adaptive: bool,
+}
+
+impl Vp9Stream {
+    /// The stream `encodings` asks for, with `quality` — the server's own — as
+    /// the ceiling where the list names none.
+    pub fn listed(encodings: &[i32], quality: u8) -> Self {
+        let has = |e: i32| encodings.contains(&e);
+        let asked = encodings
+            .iter()
+            .filter_map(|&e| u8::try_from(e.checked_sub(ENCODING_VP9_QUALITY_BASE)?).ok())
+            .find(|q| (QUALITY_MIN..=QUALITY_MAX).contains(q));
+        Self {
+            chroma: if has(ENCODING_VP9_SUBSAMPLED) { Chroma::Subsampled } else { Chroma::Full },
+            quality: asked.unwrap_or(quality),
+            adaptive: !has(ENCODING_VP9_HELD),
+        }
+    }
+
+    /// The pseudo-encodings that ask for this stream, to list beside the
+    /// encoding: the quality always, the other two where they differ from what
+    /// a list without them means.
+    pub fn encodings(self) -> Vec<i32> {
+        let mut listed = vec![ENCODING_VP9_QUALITY_BASE + i32::from(self.quality)];
+        if self.chroma == Chroma::Subsampled {
+            listed.push(ENCODING_VP9_SUBSAMPLED);
+        }
+        if !self.adaptive {
+            listed.push(ENCODING_VP9_HELD);
+        }
+        listed
+    }
+}
 
 /// Why a picture could not be encoded or a frame decoded.
 #[derive(Debug, Error)]
@@ -96,11 +164,17 @@ pub struct Vp9Encoder {
 
 #[cfg(feature = "encode")]
 impl Vp9Encoder {
-    /// An encoder for a `width`×`height` picture at `quality` (1–100).
-    pub fn new(width: u16, height: u16, quality: u8) -> Result<Self, Vp9Error> {
-        let picture = wlshare_vp9::Picture::new(width, height, Chroma::Full)?;
-        let encoder = wlshare_vp9::Encoder::new(width, height, Chroma::Full, quality, encoder_threads())?;
+    /// An encoder for a `width`×`height` picture at `chroma` and `quality`
+    /// (1–100).
+    pub fn new(width: u16, height: u16, chroma: Chroma, quality: u8) -> Result<Self, Vp9Error> {
+        let picture = wlshare_vp9::Picture::new(width, height, chroma)?;
+        let encoder = wlshare_vp9::Encoder::new(width, height, chroma, quality, encoder_threads())?;
         Ok(Self { encoder, picture })
+    }
+
+    /// The chroma this encoder codes.
+    pub fn chroma(&self) -> Chroma {
+        self.encoder.chroma()
     }
 
     /// The picture size this encoder codes.
@@ -225,7 +299,7 @@ mod tests {
     fn a_444_stream_keeps_a_one_pixel_stem_its_colour() {
         let (width, height) = (64, 48);
         let (pixels, at) = stems(width, height);
-        let mut encoder = Vp9Encoder::new(width as u16, height as u16, QUALITY_MAX).unwrap();
+        let mut encoder = Vp9Encoder::new(width as u16, height as u16, Chroma::Full, QUALITY_MAX).unwrap();
         let frame = encode(&mut encoder, &pixels, false);
         assert!(wlshare_vp9::frame_header(&frame).is_some_and(|header| header.keyframe && header.profile == 1), "an encoder's first frame is a 4:4:4 keyframe");
 
@@ -249,7 +323,7 @@ mod tests {
     #[test]
     fn keyframes_come_when_asked_and_the_dial_moves_between_them() {
         let (width, height) = (64, 32);
-        let mut encoder = Vp9Encoder::new(width as u16, height as u16, 60).unwrap();
+        let mut encoder = Vp9Encoder::new(width as u16, height as u16, Chroma::Full, 60).unwrap();
         let mut decoder = Vp9Decoder::new().unwrap();
         let mut out = vec![0; width * height * 4];
         for step in 0..5usize {
@@ -274,22 +348,49 @@ mod tests {
 
     #[test]
     fn a_frame_of_another_size_or_chroma_or_no_frame_at_all_is_an_error() {
-        let mut encoder = Vp9Encoder::new(32, 16, 60).unwrap();
+        let mut encoder = Vp9Encoder::new(32, 16, Chroma::Full, 60).unwrap();
         let frame = encode(&mut encoder, &[0u8; 32 * 16 * 4], false);
         let mut out = vec![0; 64 * 64 * 4];
         let mut decoder = Vp9Decoder::new().unwrap();
         assert!(matches!(decoder.decode_rect(&frame, 16, 16, &mut out, 64), Err(Vp9Error::Size(32, 16, 16, 16))));
         assert!(decoder.decode_rect(&[0xFF, 0x00, 0x12], 32, 16, &mut out, 128).is_err());
         assert!(matches!(decoder.decode_rect(&frame, 32, 16, &mut out[..10], 128), Err(Vp9Error::Codec(wlshare_vp9::Error::Buffer { .. }))));
-        assert!(matches!(Vp9Encoder::new(0, 16, 60), Err(Vp9Error::Codec(wlshare_vp9::Error::Empty(0, 16)))));
+        assert!(matches!(Vp9Encoder::new(0, 16, Chroma::Full, 60), Err(Vp9Error::Codec(wlshare_vp9::Error::Empty(0, 16)))));
         assert!(matches!(encoder.encode_rect(&[0; 12], 128, false, &mut Vec::new()), Err(Vp9Error::Codec(wlshare_vp9::Error::Buffer { .. }))));
 
-        // A 4:2:0 frame is a VP9 frame, and not one this encoding carries.
-        let mut picture = wlshare_vp9::Picture::new(32, 16, Chroma::Subsampled).unwrap();
-        picture.read_bgrx(&[0u8; 32 * 16 * 4], 128).unwrap();
-        let mut subsampled = wlshare_vp9::Encoder::new(32, 16, Chroma::Subsampled, 60, 1).unwrap();
-        let mut frame = Vec::new();
-        subsampled.encode(&picture, false, &mut frame).unwrap();
+        // A 4:2:0 frame, which the gateway asks for, is a VP9 frame of the
+        // same framing — and not one the desktop client's decoder carries.
+        let mut subsampled = Vp9Encoder::new(32, 16, Chroma::Subsampled, 60).unwrap();
+        assert_eq!(subsampled.chroma(), Chroma::Subsampled);
+        let frame = encode(&mut subsampled, &[0u8; 32 * 16 * 4], false);
+        assert_eq!(wlshare_vp9::frame_header(&frame).expect("a VP9 frame").profile, 0);
         assert!(matches!(Vp9Decoder::new().unwrap().decode_rect(&frame, 32, 16, &mut out, 128), Err(Vp9Error::Chroma("4:2:0"))));
+    }
+}
+
+/// What a client's list asks the stream to be, both ways.
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn the_stream_is_read_from_the_list_beside_the_encoding() {
+        let asked = Vp9Stream { chroma: Chroma::Subsampled, quality: 60, adaptive: true };
+        assert_eq!(asked.encodings(), [0x574c_513c, 0x574c_5330]);
+        let listed = [crate::ENCODING_VP9, 0x574c_513c, 0x574c_5330, crate::ENCODING_ZRLE];
+        assert_eq!(Vp9Stream::listed(&listed, 90), asked);
+        let held = Vp9Stream { chroma: Chroma::Full, quality: 100, adaptive: false };
+        assert_eq!(held.encodings(), [0x574c_5164, 0x574c_5344]);
+        assert_eq!(Vp9Stream::listed(&held.encodings(), 90), held);
+    }
+
+    #[test]
+    fn a_list_that_names_nothing_is_the_servers_stream() {
+        let none = [crate::ENCODING_VP9, crate::ENCODING_ZRLE];
+        assert_eq!(Vp9Stream::listed(&none, 90), Vp9Stream { chroma: Chroma::Full, quality: 90, adaptive: true });
+        // A quality off the dial is some other encoding, not a request.
+        for off in [ENCODING_VP9_QUALITY_BASE, ENCODING_VP9_QUALITY_BASE + 101, ENCODING_VP9_QUALITY_BASE + 255, ENCODING_VP9_QUALITY_BASE + 256] {
+            assert_eq!(Vp9Stream::listed(&[crate::ENCODING_VP9, off], 90).quality, 90, "{off:#x}");
+        }
     }
 }

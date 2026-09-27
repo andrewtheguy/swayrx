@@ -232,10 +232,10 @@ update too, and waits for a request like any other.
 A private encoding, `WLSV` (`0x574c5356`), for wlshare's own desktop clients
 and the remotex gateway: the whole desktop as one VP9 stream, for a client that
 would rather have a picture that moves than one that is exact. remotex lists it
-for a browser that decodes 4:4:4 and passes each frame to the browser as it
-came, since it is the stream remotex would otherwise encode from ZRLE's pixels;
-for a browser that does not, it lists ZRLE and encodes 4:2:0 itself. No other VNC
-client lists it, so nothing changes for them.
+for every browser and passes each frame to the browser as it came, since it is
+the stream remotex would otherwise encode from ZRLE's pixels — at the chroma
+the browser's decoder takes and the target's own dial, which it names beside
+the encoding, below. No other VNC client lists it, so nothing changes for them.
 
 A client that lists it gets it instead of ZRLE, wherever in the list it is. Each
 update is then one rectangle covering the whole framebuffer, whose body is a
@@ -255,9 +255,14 @@ keyframe that was not asked for, and the colour declared in the bitstream.
 `crates/wlshare-rfb/src/vp9.rs` is the framing over it — the length word and
 its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
 
-- **8-bit 4:4:4, VP9 profile 1.** A colour sample per pixel: the loss 4:2:0
-  costs a desktop is its text's colour — a one-pixel coloured stem shares its
-  sample with three pixels of background — and no quantizer puts it back.
+- **8-bit 4:4:4, VP9 profile 1, unless the client asks for 4:2:0.** A colour
+  sample per pixel: the loss 4:2:0 costs a desktop is its text's colour — a
+  one-pixel coloured stem shares its sample with three pixels of background —
+  and no quantizer puts it back. The gateway asks for 4:2:0 (profile 0) for a
+  browser whose decoder takes nothing else, since a stream that browser refuses
+  by name carries no colour at all, by listing `WLS0` beside the encoding
+  (below); wlshare's own desktop clients never ask, and their decoder takes
+  4:4:4 alone.
 - **BT.601 at studio swing**, converted from the framebuffer's `B, G, R, X` and
   declared in the keyframe header, so a decoder converts back with the same
   matrix. The client's pixel format does not apply.
@@ -296,6 +301,24 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   moves on the running encoder, so a move costs no keyframe, and an encoder
   made at a new size starts where it stands. A slowed session paces its own
   frames; an unslowed one is paced by the capture and its one fence in flight.
+- **What the client lists beside it says what the stream is to be**, the way
+  Tight's quality levels ride `SetEncodings` — pseudo-encodings rather than a
+  message, because a server that is not wlshare ignores an encoding it does
+  not know where a message it does not know ends the connection, and because
+  they ride the list that names the encoding, so the first frame is already
+  what was asked for. `WLS0` (`0x574c5330`) asks for 4:2:0 in place of 4:4:4;
+  `0x574c5100` plus a quality 1–100 (`WLQ` and the value) names the ceiling the
+  walk never goes above, in place of `vp9_quality`; `WLSD` (`0x574c5344`)
+  holds the dial there, with a walk that hears nothing in a fence — only a
+  frame whose write blocked moves it, fence or no fence — and a settle with
+  nothing to sharpen. The gateway lists them from the target's keys, so
+  `render_chroma`, `video_quality` and `render_adaptive` mean on a passed
+  stream what they mean on one the gateway codes. Read at every
+  `SetEncodings`, and owed a frame whether or not the desktop changed: a new
+  chroma starts the stream over at a keyframe, a new ceiling moves the running
+  encoder's dial and sends the picture once at it, as a settle does, and a new
+  walk moves the dial alone. A list that names none of them — every desktop
+  client's — is 4:4:4 at `vp9_quality` with the walk.
   Screen-content tuning, libvpx's
   realtime speed 7, no lag, and threads with row and tile parallelism: the
   machine's cores less two, at most eight, for the encoder, since an encode
@@ -787,9 +810,9 @@ bare reason "authentication failed"; the actual reason is logged.
 
 Tight, TightPNG, Hextile, RRE, CopyRect and every lossy encoding but the VP9
 one: the gateway re-encodes every tile anyway, and ZRLE is the standard's best
-lossless choice. VP9 at 4:2:0, a VP9 quality above the configured one however
-much room the link has, and the VP9 encoding for any client that does not list
-it.
+lossless choice. A VP9 quality above the ceiling the stream was asked for
+however much room the link has, the VP9 encoding for any client that does not
+list it, and 4:2:0 for wlshare's own desktop client, which has no use for it.
 8- and 16-bit pixel formats and colour maps. Moving the client's pointer: the
 PointerPos pseudo-encoding would carry a warp the compositor made, and the
 cursor session does report positions, but only when the output repaints.

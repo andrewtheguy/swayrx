@@ -35,20 +35,22 @@ flacenc = { version = "0.5", default-features = false, optional = true }
 # trait and the packet it takes.
 symphonia-bundle-flac = { version = "0.6", optional = true }
 symphonia-core = { version = "0.6", optional = true }
-# The VP9 encoding's codec, behind both features: the one place libvpx is
-# spoken to, for this workspace and for the remotex gateway, which pulls it from
-# this repository by git.
-wlshare-vp9 = { path = "../wlshare-vp9", optional = true }
+# The VP9 encoding's codec: the one place libvpx is spoken to, for this
+# workspace and for the remotex gateway, which pulls it from this repository by
+# git. Not behind a feature, since what a client lists beside the encoding
+# (`vp9::Vp9Stream`) names its chroma, and the daemon and the client both
+# take one of the features anyway.
+wlshare-vp9 = { path = "../wlshare-vp9" }
 
 [features]
 # The server's FLAC encoder, `audio::FlacEncoder`, and VP9 encoder,
 # `vp9::Vp9Encoder`. Off by default, so a client, which only decodes, does not
 # build an encoder it never runs.
-encode = ["dep:flacenc", "dep:wlshare-vp9"]
+encode = ["dep:flacenc"]
 # The client's FLAC decoder, `audio::FlacDecoder`, and VP9 decoder,
 # `vp9::Vp9Decoder`. Off by default, so the daemon, which only encodes, does not
 # build a decoder it never runs.
-decode = ["dep:symphonia-bundle-flac", "dep:symphonia-core", "dep:wlshare-vp9"]
+decode = ["dep:symphonia-bundle-flac", "dep:symphonia-core"]
 
 [dev-dependencies]
 # The encoder's tests read every frame back with the client's decoder, which

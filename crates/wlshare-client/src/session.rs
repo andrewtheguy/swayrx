@@ -1487,14 +1487,14 @@ mod tests {
     /// framebuffer and is said to have arrived.
     #[tokio::test]
     async fn vp9_frames_are_decoded_into_the_framebuffer() {
-        use wlshare_rfb::vp9::{QUALITY_MAX, Vp9Encoder};
+        use wlshare_rfb::vp9::{Chroma, QUALITY_MAX, Vp9Encoder};
 
         let mut live = live();
         live.encoding = Encoding::Vp9;
         live.shared.framebuffer.lock().unwrap().resize(64, 32).unwrap();
         live.shared.framebuffer.lock().unwrap().take_damage();
         let mut writer = writer();
-        let mut encoder = Vp9Encoder::new(64, 32, QUALITY_MAX).unwrap();
+        let mut encoder = Vp9Encoder::new(64, 32, Chroma::Full, QUALITY_MAX).unwrap();
         for colour in [[200u8, 40, 10, 0], [10, 220, 60, 0]] {
             let mut wire = wlshare_rfb::msg::update_header(1).to_vec();
             wire.extend_from_slice(&wlshare_rfb::msg::rect_header(0, 0, 64, 32, ENCODING_VP9));
