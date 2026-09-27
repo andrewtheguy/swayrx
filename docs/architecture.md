@@ -12,9 +12,17 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
                      data-control
 ```
 
+- `crates/wlshare-vp9` is the one place libvpx is spoken to, for this workspace
+  and for the remotex gateway, which pulls it from this repository by git: the
+  encoder configuration a desktop is coded with, the planes in front of it at
+  either chroma, the decoder, and what a frame says about itself. It has no
+  platform dependency, and a change to how a desktop is coded is made there
+  once for the daemon, the desktop client and the gateway. See
+  [The VP9 encoding](#the-vp9-encoding).
 - `crates/wlshare-rfb` decides every byte on the wire: handshake, message parsing
-  and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding, the
-  density, outputs, camera and microphone extensions. It has no platform dependency and its tests decode every encoder's
+  and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding's
+  framing over `wlshare-vp9`, the density, outputs, camera and microphone
+  extensions. It has no platform dependency and its tests decode every encoder's
   output with an independent decoder written from the RFC, and run the RSA-AES
   exchange against a client written from the specification.
 - `crates/wlshare` is the daemon. `compositor.rs` is the Wayland thread and its
@@ -239,8 +247,13 @@ u8[length]   one VP9 frame
 ```
 
 Successive rectangles are one stream, each frame coded against the ones before
-it, so a client decodes them all with one decoder, in order. What it holds is
-fixed:
+it, so a client decodes them all with one decoder, in order. The coding is
+`crates/wlshare-vp9`'s, which remotex encodes its own streams with as well, so
+the two sides agree on every libvpx setting by construction: the quantizer
+pinned to the dial, screen-content tuning, no lag, no dropped frames, no
+keyframe that was not asked for, and the colour declared in the bitstream.
+`crates/wlshare-rfb/src/vp9.rs` is the framing over it — the length word and
+its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
 
 - **8-bit 4:4:4, VP9 profile 1.** A colour sample per pixel: the loss 4:2:0
   costs a desktop is its text's colour — a one-pixel coloured stem shares its

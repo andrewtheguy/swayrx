@@ -2,9 +2,11 @@
 
 - Strict no backward-compatibility or legacy paths no matter what.
 
-- Three crates: `wlshare-rfb` (protocol) and `wlshare-client` (the session the
-  macOS and Windows apps are built on), both platform-independent and tested by
-  a bare `cargo test`, and `wlshare` (the daemon, Linux + wlroots-based Wayland only). After Rust
+- Four crates: `wlshare-vp9` (the VP9 coding, shared with the remotex gateway,
+  which pulls it from this repository by git — a libvpx setting changes there
+  and nowhere else), `wlshare-rfb` (protocol) and `wlshare-client` (the session
+  the macOS and Windows apps are built on), all platform-independent and tested
+  by a bare `cargo test`, and `wlshare` (the daemon, Linux + wlroots-based Wayland only). After Rust
   changes run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
   The daemon has no cross-target check to run: nothing in it is
   architecture-specific, and the release builds each architecture in Docker on

@@ -1791,7 +1791,6 @@ dependencies = [
  "eax",
  "flacenc",
  "flate2",
- "libvpx-prebuilt-sys",
  "pkcs8",
  "rand",
  "rsa",
@@ -1803,6 +1802,16 @@ dependencies = [
  "thiserror",
  "tokio",
  "wlshare-rfb",
+ "wlshare-vp9",
+]
+
+[[package]]
+name = "wlshare-vp9"
+version = "0.0.40"
+dependencies = [
+ "libvpx-prebuilt-sys",
+ "log",
+ "thiserror",
  "yuv",
 ]
 

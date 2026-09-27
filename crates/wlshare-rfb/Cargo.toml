@@ -35,27 +35,20 @@ flacenc = { version = "0.5", default-features = false, optional = true }
 # trait and the packet it takes.
 symphonia-bundle-flac = { version = "0.6", optional = true }
 symphonia-core = { version = "0.6", optional = true }
-# The VP9 encoding's codec, behind both features: libvpx 1.16 as a static
-# archive for this target, downloaded and checked by the crate's build script —
-# nothing to configure, assemble or install. The archives cover macOS arm64,
-# Linux x86_64 and aarch64 and Windows x86_64, which is every place a daemon or
-# a client of this crate is built.
-vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260924182850-e78d74f", optional = true }
-# The conversion between the framebuffer's `B, G, R, X` and the encoding's
-# 4:4:4 planes, behind both features: pure Rust with AVX2 and NEON paths chosen
-# at run time, which is three to four times the speed of a scalar loop on a 4K
-# frame, and a third of the client's decode step was that loop.
-yuv = { version = "0.8", optional = true }
+# The VP9 encoding's codec, behind both features: the one place libvpx is
+# spoken to, for this workspace and for the remotex gateway, which pulls it from
+# this repository by git.
+wlshare-vp9 = { path = "../wlshare-vp9", optional = true }
 
 [features]
 # The server's FLAC encoder, `audio::FlacEncoder`, and VP9 encoder,
 # `vp9::Vp9Encoder`. Off by default, so a client, which only decodes, does not
 # build an encoder it never runs.
-encode = ["dep:flacenc", "dep:vpx-sys", "dep:yuv"]
+encode = ["dep:flacenc", "dep:wlshare-vp9"]
 # The client's FLAC decoder, `audio::FlacDecoder`, and VP9 decoder,
 # `vp9::Vp9Decoder`. Off by default, so the daemon, which only encodes, does not
 # build a decoder it never runs.
-decode = ["dep:symphonia-bundle-flac", "dep:symphonia-core", "dep:vpx-sys", "dep:yuv"]
+decode = ["dep:symphonia-bundle-flac", "dep:symphonia-core", "dep:wlshare-vp9"]
 
 [dev-dependencies]
 # The encoder's tests read every frame back with the client's decoder, which
