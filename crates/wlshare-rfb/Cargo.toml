@@ -40,7 +40,7 @@ symphonia-core = { version = "0.6", optional = true }
 # behind a feature, since what a client lists beside the encoding
 # (`vp9::Vp9Stream`) names its chroma, and the daemon and the client both
 # take one of the features anyway.
-desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.1" }
+desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.2" }
 
 [features]
 # The server's FLAC encoder, `audio::FlacEncoder`, and VP9 encoder,
