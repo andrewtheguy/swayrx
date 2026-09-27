@@ -253,8 +253,12 @@ fixed:
   to wherever the dial is, with no bitrate, no adaptive quantization and no
   dropped frames. A session starts at `vp9_quality` (90 by default, for the
   LAN wlshare mostly runs on), which is a ceiling it never goes above, and
-  walks down to `vp9_quality_min` (20, or `vp9_quality` if that is lower)
-  while the client is behind — remotex's walk (`crates/wlshare/src/quality.rs`).
+  walks down to a floor of 20 while the client is behind — remotex's walk
+  (`crates/wlshare/src/quality.rs`). The floor is a constant, not a key, as
+  every adaptive stream's is: where WebRTC's quality scaler hands off from the
+  quantizer to resolution and frame rate at its own threshold, this walk hands
+  off to the frame rate, and the settle below sharpens a quiet desktop back at
+  `vp9_quality`.
   A frame's queueing is its fence's round trip — answered once the client has
   the frame, which for wlshare's own client means once its window has drawn it
   ([below](#the-desktop-clients-paint)) — less the shortest of the last

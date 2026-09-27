@@ -184,8 +184,6 @@ pub struct SessionConfig {
     pub resize: bool,
     /// The VP9 encoding's finest quality, 1–100, where a session starts.
     pub vp9_quality: u8,
-    /// The coarsest the VP9 encoding's quality goes on a link that is behind.
-    pub vp9_quality_min: u8,
     /// Whether the audio extension is announced and served.
     pub audio: bool,
     /// Whether the camera extension is announced and served.
@@ -248,7 +246,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
 
     let events = shared.events.subscribe();
     let frames = shared.frame_tx.subscribe();
-    let walk = QualityWalk::new(config.vp9_quality, config.vp9_quality_min);
+    let walk = QualityWalk::new(config.vp9_quality);
     let mut session = Session {
         id,
         shared,
@@ -649,12 +647,7 @@ impl Session {
                 }
                 let vp9 = has(ENCODING_VP9);
                 if vp9 && !self.use_vp9 {
-                    info!(
-                        "client {}: asked for VP9 at quality {}, as low as {} on a link that is behind",
-                        self.id.0,
-                        self.walk.quality(),
-                        self.config.vp9_quality_min
-                    );
+                    info!("client {}: asked for VP9 at quality {}", self.id.0, self.walk.quality());
                     // A decoder that has seen nothing of this stream starts at a keyframe.
                     self.keyframe_owed = true;
                 } else if !vp9 && self.use_vp9 {
@@ -1205,7 +1198,7 @@ impl Session {
         }
         let sent = Instant::now();
         writer.send(&self.out).await.context("writing an update")?;
-        if let Some((keyframe, verdict)) = vp9 {
+        if let Some((keyframe, _)) = vp9 {
             // Judged by the quality the frame was encoded at, which is what the
             // client is holding: the ceiling for a settle, whatever the walk holds.
             let quality = if settling { self.config.vp9_quality } else { self.vp9.as_ref().expect("a VP9 frame was encoded").quality() };

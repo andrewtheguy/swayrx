@@ -1,6 +1,6 @@
 //! The VP9 quality and frame rate a session's link will bear.
 //!
-//! The configured `vp9_quality` is a ceiling and `vp9_quality_min` a floor;
+//! The configured `vp9_quality` is a ceiling and [`QUALITY_FLOOR`] the floor;
 //! between them the dial walks down when the client falls behind and back up
 //! when it keeps up, and past the floor it is the frame rate that goes. The
 //! signal is how long a frame takes to be delivered, decoded and — for a
@@ -113,6 +113,17 @@ const REFUSAL_HOLD: Duration = Duration::from_secs(15);
 /// See [`REFUSAL_HOLD`].
 const REFUSAL_WINDOW: Duration = Duration::from_secs(4);
 
+/// The coarsest a moving picture is coded at before the frames go: the walk's
+/// floor, and the point where it hands off to the frame rate. Fixed rather
+/// than configured, as every adaptive stream's is — WebRTC's quality scaler
+/// hands off to resolution and frame rate at an internal quantizer threshold
+/// in the coarsest fifth of VP9's range, TigerVNC's AutoSelect has a built-in
+/// bottom rung — because past it a finer quantizer step buys nothing a viewer
+/// can see, and the settle sharpens a quiet desktop at the ceiling whatever
+/// the walk holds. A ceiling below it is on the floor from the start and
+/// gives up frames alone.
+const QUALITY_FLOOR: u8 = 20;
+
 /// The frame interval a slowed link starts from, and how many times it may be
 /// doubled — 30 Hz down to 3.75 — for a link still behind on the floor. Bytes
 /// on the wire are bytes per frame times frames per second, and the floor
@@ -145,8 +156,6 @@ pub struct Pace {
 pub struct QualityWalk {
     /// The configured quality: the finest this ever asks for.
     ceiling: u8,
-    /// The coarsest it may go.
-    floor: u8,
     /// The quality in force for a moving picture.
     quality: u8,
     /// How many times the frame interval is doubled, at most [`SLOW_MAX`].
@@ -180,13 +189,10 @@ pub struct QualityWalk {
 }
 
 impl QualityWalk {
-    /// A walk that starts at `ceiling` and never goes below `floor`, which is
-    /// at most the ceiling.
-    pub fn new(ceiling: u8, floor: u8) -> Self {
-        debug_assert!(floor <= ceiling, "the configuration refuses a floor above the ceiling");
+    /// A walk that starts at `ceiling` and goes down to [`QUALITY_FLOOR`].
+    pub fn new(ceiling: u8) -> Self {
         Self {
             ceiling,
-            floor: floor.min(ceiling),
             quality: ceiling,
             slow: 0,
             recent: VecDeque::new(),
@@ -336,7 +342,7 @@ impl QualityWalk {
             1
         };
         let mut moved = false;
-        let on_floor = self.quality <= self.floor;
+        let on_floor = self.quality <= QUALITY_FLOOR;
         if let Some((from, _)) = self.reclaimed.filter(|(_, at)| now.saturating_duration_since(*at) <= REFUSAL_WINDOW) {
             // A step up the link refused: back to the quality it bore, and the
             // walk may come halfway back up towards the one it would not take.
@@ -348,7 +354,7 @@ impl QualityWalk {
                 moved = true;
             }
         } else if !on_floor {
-            self.quality = self.quality.saturating_sub(STEP_DOWN * steps).max(self.floor);
+            self.quality = self.quality.saturating_sub(STEP_DOWN * steps).max(QUALITY_FLOOR);
             moved = true;
         }
         if (on_floor || steps == 3) && self.slow < SLOW_MAX {
@@ -373,7 +379,7 @@ impl QualityWalk {
         if self.refused.is_some_and(|(_, at)| now.saturating_duration_since(at) >= REFUSAL_HOLD) {
             self.refused = None;
         }
-        let ceiling = self.refused.map_or(self.ceiling, |(cap, _)| cap.max(self.floor)).min(self.ceiling);
+        let ceiling = self.refused.map_or(self.ceiling, |(cap, _)| cap).min(self.ceiling);
         let wanted = self.quality.saturating_add(self.reclaim).min(ceiling);
         if wanted <= self.quality {
             return false;
@@ -397,8 +403,8 @@ mod tests {
     const CLEAR_RUN: u32 = 32;
 
     /// A walk that has learnt a 40 ms link floor from one clear delivery.
-    fn walk(ceiling: u8, floor: u8, start: Instant) -> QualityWalk {
-        let mut walk = QualityWalk::new(ceiling, floor);
+    fn walk(ceiling: u8, start: Instant) -> QualityWalk {
+        let mut walk = QualityWalk::new(ceiling);
         assert_eq!(walk.fenced(40 * MS, true, start), None);
         walk
     }
@@ -419,7 +425,7 @@ mod tests {
     #[test]
     fn a_link_that_keeps_up_stays_at_the_ceiling_however_far_away() {
         let start = Instant::now();
-        let mut walk = walk(60, 20, start);
+        let mut walk = walk(60, start);
         for i in 0..200 {
             assert_eq!(walk.fenced(45 * MS, true, start + i * 10 * MS), None);
         }
@@ -430,20 +436,21 @@ mod tests {
     #[test]
     fn falling_behind_gives_quality_up_down_to_the_floor_once_a_second() {
         let start = Instant::now();
-        let mut walk = walk(60, 35, start);
+        // Two steps above the floor, so the walk reaches it in three.
+        let mut walk = walk(QUALITY_FLOOR + 2 * STEP_DOWN + 5, start);
         assert_eq!(walk.fenced(140 * MS, true, start), None, "one slow frame is not a verdict");
-        assert_eq!(walk.fenced(140 * MS, true, start), Some(Pace { quality: 50, interval: Duration::ZERO }));
+        assert_eq!(walk.fenced(140 * MS, true, start), Some(Pace { quality: QUALITY_FLOOR + STEP_DOWN + 5, interval: Duration::ZERO }));
         for _ in 0..4 {
             assert_eq!(walk.fenced(140 * MS, true, start + 500 * MS), None, "inside the cooldown");
         }
-        assert_eq!(walk.fenced(140 * MS, true, start + 1100 * MS).map(|pace| pace.quality), Some(40));
+        assert_eq!(walk.fenced(140 * MS, true, start + 1100 * MS).map(|pace| pace.quality), Some(QUALITY_FLOOR + 5));
         walk.fenced(140 * MS, true, start + 2200 * MS);
-        assert_eq!(walk.fenced(140 * MS, true, start + 2200 * MS).map(|pace| pace.quality), Some(35), "stops at the floor");
+        assert_eq!(walk.fenced(140 * MS, true, start + 2200 * MS).map(|pace| pace.quality), Some(QUALITY_FLOOR), "stops at the floor");
         // On the floor, the frames go: doubled once per verdict, to the limit.
         walk.fenced(140 * MS, true, start + 3300 * MS);
         assert_eq!(
             walk.fenced(140 * MS, true, start + 3300 * MS),
-            Some(Pace { quality: 35, interval: SLOW_INTERVAL * 2 })
+            Some(Pace { quality: QUALITY_FLOOR, interval: SLOW_INTERVAL * 2 })
         );
         for i in 2..=u32::from(SLOW_MAX) + 1 {
             let at = start + (2200 + 1100 * i) * MS;
@@ -454,16 +461,16 @@ mod tests {
         let at = start + 20_000 * MS;
         walk.fenced(140 * MS, true, at);
         assert_eq!(walk.fenced(140 * MS, true, at), None, "nothing left to give");
-        assert_eq!(walk.quality(), 35);
+        assert_eq!(walk.quality(), QUALITY_FLOOR);
     }
 
     #[test]
     fn a_link_far_behind_gives_up_more_at_once() {
         let start = Instant::now();
-        let mut heavy = walk(90, 20, start);
+        let mut heavy = walk(90, start);
         heavy.fenced(40 * MS + LAG_HEAVY, true, start);
         assert_eq!(heavy.fenced(40 * MS + LAG_HEAVY, true, start), Some(Pace { quality: 70, interval: Duration::ZERO }));
-        let mut severe = walk(90, 20, start);
+        let mut severe = walk(90, start);
         severe.fenced(40 * MS + LAG_SEVERE, true, start);
         assert_eq!(severe.fenced(40 * MS + LAG_SEVERE, true, start), Some(Pace { quality: 60, interval: SLOW_INTERVAL * 2 }));
     }
@@ -471,7 +478,7 @@ mod tests {
     #[test]
     fn quality_comes_back_slowly_then_faster_and_never_past_the_ceiling() {
         let start = Instant::now();
-        let mut walk = walk(60, 20, start);
+        let mut walk = walk(60, start);
         walk.fenced(140 * MS, true, start);
         assert_eq!(walk.fenced(140 * MS, true, start).map(|pace| pace.quality), Some(50));
         let mut at = start + ADJUST_COOLDOWN;
@@ -487,26 +494,28 @@ mod tests {
     #[test]
     fn the_frames_come_back_before_the_quality() {
         let start = Instant::now();
-        let mut walk = walk(60, 50, start);
+        // One step above the floor: the first verdict puts the walk on it, the
+        // next two take the frames.
+        let mut walk = walk(QUALITY_FLOOR + STEP_DOWN, start);
         for i in 0..3 {
             let at = start + ADJUST_COOLDOWN * i;
             walk.fenced(140 * MS, true, at);
             walk.fenced(140 * MS, true, at);
         }
-        assert_eq!(walk.pace(), Pace { quality: 50, interval: SLOW_INTERVAL * 4 });
+        assert_eq!(walk.pace(), Pace { quality: QUALITY_FLOOR, interval: SLOW_INTERVAL * 4 });
         let at = start + ADJUST_COOLDOWN * 4;
         let (moved, at) = clear(&mut walk, CLEAR_RUN, at);
-        assert_eq!(moved, Some(Pace { quality: 50, interval: SLOW_INTERVAL * 2 }));
+        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR, interval: SLOW_INTERVAL * 2 }));
         let (moved, at) = clear(&mut walk, CLEAR_RUN, at + ADJUST_COOLDOWN);
-        assert_eq!(moved, Some(Pace { quality: 50, interval: Duration::ZERO }));
+        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR, interval: Duration::ZERO }));
         let (moved, _) = clear(&mut walk, CLEAR_RUN, at + ADJUST_COOLDOWN);
-        assert_eq!(moved, Some(Pace { quality: 53, interval: Duration::ZERO }));
+        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR + STEP_UP, interval: Duration::ZERO }));
     }
 
     #[test]
     fn a_refused_quality_is_held_out_of_reach() {
         let start = Instant::now();
-        let mut walk = walk(90, 20, start);
+        let mut walk = walk(90, start);
         for i in 0..3 {
             let at = start + ADJUST_COOLDOWN * i;
             walk.fenced(140 * MS, true, at);
@@ -543,12 +552,12 @@ mod tests {
     #[test]
     fn intermittent_lag_is_still_a_verdict() {
         let start = Instant::now();
-        let mut walk = walk(90, 20, start);
+        let mut walk = walk(90, start);
         assert_eq!(walk.fenced(140 * MS, true, start), None);
         assert_eq!(walk.fenced(40 * MS, true, start + 33 * MS), None);
         assert_eq!(walk.fenced(140 * MS, true, start + 66 * MS).map(|pace| pace.quality), Some(80));
         // But one behind frame four ago is forgotten.
-        let mut once = self::walk(90, 20, start);
+        let mut once = self::walk(90, start);
         once.fenced(140 * MS, true, start);
         for i in 1..=VERDICT_WINDOW {
             once.fenced(40 * MS, true, start + i * 33 * MS);
@@ -559,7 +568,7 @@ mod tests {
     #[test]
     fn a_draining_queue_is_not_stepped_on_again() {
         let start = Instant::now();
-        let mut walk = walk(90, 20, start);
+        let mut walk = walk(90, start);
         walk.fenced(40 * MS + LAG_SEVERE, true, start);
         assert_eq!(walk.fenced(40 * MS + LAG_SEVERE, true, start).map(|pace| pace.quality), Some(60));
         // Still well behind a second later, but a third less than it was.
@@ -575,7 +584,7 @@ mod tests {
     #[test]
     fn a_refused_step_up_is_walked_back_quickly() {
         let start = Instant::now();
-        let mut walk = walk(90, 20, start);
+        let mut walk = walk(90, start);
         walk.fenced(140 * MS, true, start);
         assert_eq!(walk.fenced(140 * MS, true, start).map(|pace| pace.quality), Some(80));
         let (moved, at) = clear(&mut walk, CLEAR_RUN, start + ADJUST_COOLDOWN);
@@ -592,7 +601,7 @@ mod tests {
     #[test]
     fn a_settle_after_a_step_up_restores_the_full_cooldown() {
         let start = Instant::now();
-        let mut walk = walk(90, 20, start);
+        let mut walk = walk(90, start);
         walk.fenced(140 * MS, true, start);
         assert_eq!(walk.fenced(140 * MS, true, start).map(|pace| pace.quality), Some(80));
         let (moved, at) = clear(&mut walk, CLEAR_RUN, start + ADJUST_COOLDOWN);
@@ -607,7 +616,7 @@ mod tests {
     #[test]
     fn a_keyframe_holds_the_verdicts_while_it_crosses() {
         let start = Instant::now();
-        let mut walk = walk(90, 20, start);
+        let mut walk = walk(90, start);
         walk.keyframe(start);
         let mut at = start;
         while at + 33 * MS < start + KEYFRAME_HOLD {
@@ -623,7 +632,7 @@ mod tests {
     #[test]
     fn a_second_of_clear_frames_is_enough_however_slow_they_come() {
         let start = Instant::now();
-        let mut walk = walk(90, 20, start);
+        let mut walk = walk(90, start);
         walk.fenced(40 * MS + LAG_SEVERE, true, start);
         assert_eq!(walk.fenced(40 * MS + LAG_SEVERE, true, start), Some(Pace { quality: 60, interval: SLOW_INTERVAL * 2 }));
         let mut at = start + ADJUST_COOLDOWN;
@@ -638,7 +647,7 @@ mod tests {
     #[test]
     fn a_frame_that_is_no_verdict_can_still_teach_the_floor() {
         let start = Instant::now();
-        let mut walk = QualityWalk::new(60, 20);
+        let mut walk = QualityWalk::new(60);
         for _ in 0..5 {
             assert_eq!(walk.fenced(400 * MS, false, start), None);
         }
@@ -652,7 +661,7 @@ mod tests {
     #[test]
     fn the_hysteresis_band_neither_gives_up_nor_takes_back() {
         let start = Instant::now();
-        let mut walk = walk(60, 20, start);
+        let mut walk = walk(60, start);
         walk.fenced(140 * MS, true, start);
         walk.fenced(140 * MS, true, start);
         // Inside one baseline window: longer, and 85 ms would be the floor.
@@ -665,7 +674,7 @@ mod tests {
     #[test]
     fn settling_keeps_the_walks_place_and_restarts_the_cooldown() {
         let start = Instant::now();
-        let mut walk = walk(60, 20, start);
+        let mut walk = walk(60, start);
         walk.fenced(140 * MS, true, start);
         assert_eq!(walk.fenced(140 * MS, true, start).map(|pace| pace.quality), Some(50));
         assert!(walk.coarse(walk.quality()));
@@ -682,7 +691,7 @@ mod tests {
     #[test]
     fn a_settle_starts_the_clear_run_over() {
         let start = Instant::now();
-        let mut walk = walk(60, 20, start);
+        let mut walk = walk(60, start);
         walk.fenced(140 * MS, true, start);
         assert_eq!(walk.fenced(140 * MS, true, start).map(|pace| pace.quality), Some(50));
         // Three clear frames, the cooldown over, and then the desktop goes quiet.
@@ -701,7 +710,7 @@ mod tests {
     #[test]
     fn a_blocked_write_is_lag_without_a_floor() {
         let start = Instant::now();
-        let mut walk = QualityWalk::new(60, 20);
+        let mut walk = QualityWalk::new(60);
         assert_eq!(walk.written(80 * MS, start), None);
         assert_eq!(walk.written(80 * MS, start).map(|pace| pace.quality), Some(50));
     }
@@ -709,7 +718,7 @@ mod tests {
     #[test]
     fn the_floor_forgets_a_route_that_is_gone() {
         let start = Instant::now();
-        let mut walk = walk(60, 20, start);
+        let mut walk = walk(60, start);
         // A new route, 200 ms further: slow at first, then its own floor.
         let mut at = start;
         for _ in 0..12 {
@@ -717,7 +726,7 @@ mod tests {
             walk.fenced(240 * MS, true, at);
             walk.fenced(240 * MS, true, at);
         }
-        assert_eq!(walk.quality(), 20, "the old floor made the new route read as queueing");
+        assert_eq!(walk.quality(), QUALITY_FLOOR, "the old floor made the new route read as queueing");
         assert_eq!(walk.interval(), SLOW_INTERVAL * 8);
         // Once the old floor has left the window, the new route is a link that
         // keeps up: the frames come back, then the quality.
@@ -731,6 +740,7 @@ mod tests {
             moved.extend(last);
             at = then + ADJUST_COOLDOWN;
         }
-        assert_eq!(moved.last(), Some(&Pace { quality: 29, interval: Duration::ZERO }));
+        // Three runs take the frames back, then two steps up: three, then six.
+        assert_eq!(moved.last(), Some(&Pace { quality: QUALITY_FLOOR + 3 * STEP_UP, interval: Duration::ZERO }));
     }
 }

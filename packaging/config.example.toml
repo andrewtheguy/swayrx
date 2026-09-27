@@ -44,16 +44,14 @@ max_fps = 60
 # The finest quality, 1-100, of the VP9 encoding: the whole desktop as one VP9
 # 4:4:4 stream, sent to a client that asks for it instead of ZRLE — wlshare's
 # own desktop clients do; remotex and other VNC clients never ask, and get ZRLE.
-# A session starts here and gives quality up while its client falls behind,
-# taking it back once the client keeps up, never past this — and at once, as one
-# frame, when a desktop left coarse has been quiet half a second. Higher is sharper
+# A session starts here and gives quality up while its client falls behind, then
+# frames, taking both back once the client keeps up, never past this — and at
+# once, as one frame, when a desktop left coarse has been quiet half a second.
+# Where quality gives way to frames is built into the encoder, as in every
+# adaptive stream, so there is no floor to set. Higher is sharper
 # and larger. 90, because wlshare is mostly used on a LAN, which has the room;
 # the sound is lossless already, and the picture need not be the weak link.
 vp9_quality = 90
-
-# The coarsest quality a VP9 session gives up to on a link that is behind, at
-# most vp9_quality. Unset, 20 or vp9_quality, whichever is lower.
-# vp9_quality_min = 20
 
 # Seconds a connection has to finish the handshake — the security exchange and
 # the login — before it is dropped. A client that shows its user the server key

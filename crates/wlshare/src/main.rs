@@ -228,7 +228,6 @@ async fn serve(
         name: config.name.clone(),
         resize: config.resize,
         vp9_quality: config.vp9_quality,
-        vp9_quality_min: config.vp9_quality_min(),
         audio: config.audio,
         camera: config.camera,
         microphone: config.microphone,
