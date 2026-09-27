@@ -262,7 +262,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
         keyframe_owed: false,
         walk,
         vp9_in_flight: None,
-        frame_after: None,
+        frame_sent: None,
         coarse_since: None,
         settle_owed: false,
         continuous_supported: false,
@@ -402,9 +402,11 @@ struct Session {
     /// whether its delivery is a verdict about the link — a delta frame at the
     /// walk's quality, so neither a keyframe nor the settle's frame.
     vp9_in_flight: Option<(Instant, bool)>,
-    /// The earliest the next VP9 frame may go out, on a link the walk has
-    /// slowed ([`QualityWalk::interval`]); `None` where the capture paces.
-    frame_after: Option<Instant>,
+    /// When the last VP9 frame went out. On a link the walk has slowed, the
+    /// next may go the walk's interval after it ([`QualityWalk::interval`]),
+    /// read when it is asked for, so a step the fence of that frame brings
+    /// paces the very next one.
+    frame_sent: Option<Instant>,
     /// The last VP9 frame went out below the configured quality, and the
     /// client has had it since then: the desktop is settled at the configured
     /// quality once it has stayed quiet [`SETTLE_IDLE`] from there. `None`
@@ -1103,9 +1105,15 @@ impl Session {
             }
         };
         // A slowed link's frame waits for its turn; the announcements above do
-        // not, since none of them is a frame. A cursor or a resize a quarter of
-        // a second late is the one lag the walk is not there to add.
-        if self.frame_at().is_some() {
+        // not, since none of them is a frame, and neither does a desktop that
+        // changed size, whose frame carries the geometry the client is drawing
+        // everything else against. A cursor or a resize a quarter of a second
+        // late is the one lag the walk is not there to add.
+        let resized = {
+            let fb = self.shared.framebuffer.lock().unwrap();
+            fb.painted && (fb.width, fb.height) != self.known_size
+        };
+        if !resized && self.frame_at().is_some() {
             answered(self);
             return Ok(());
         }
@@ -1218,8 +1226,7 @@ impl Session {
             }
             self.coarse_since = self.walk.coarse(quality).then_some(sent);
             self.settle_owed = false;
-            let interval = self.walk.interval();
-            self.frame_after = (!interval.is_zero()).then(|| sent + interval);
+            self.frame_sent = Some(sent);
         }
         match vp9.map(|(_, verdict)| verdict) {
             Some(verdict) if self.fence_supported => self.vp9_in_flight = Some((sent, verdict)),
@@ -1273,12 +1280,17 @@ impl Session {
 
     /// When a frame the walk slowed may go out, or `None` when the next frame
     /// is not held: nothing is wanted, a fence is outstanding, the link is not
-    /// slowed, or its interval has passed.
+    /// slowed, or its interval has passed. The interval is the walk's as it
+    /// stands now, not as it stood when the last frame went out.
     fn frame_at(&self) -> Option<Instant> {
         if !self.use_vp9 || self.fence_outstanding || !(self.continuous || self.pending.is_some()) {
             return None;
         }
-        self.frame_after.filter(|at| Instant::now() < *at)
+        let interval = self.walk.interval();
+        if interval.is_zero() {
+            return None;
+        }
+        self.frame_sent.map(|sent| sent + interval).filter(|at| Instant::now() < *at)
     }
 
     /// When the desktop is to be settled at the configured quality: a frame

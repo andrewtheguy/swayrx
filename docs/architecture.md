@@ -267,8 +267,10 @@ fixed:
   behind frames (60 ms of queueing or more) among the last four give quality
   up: ten points, twenty at 150 ms, thirty at 400 ms; once the dial is on the
   floor the capture's frame interval doubles instead, 33 ms up to 133 at the
-  default `max_fps`, and at 400 ms both go at once. The cursor, a resize and
-  the audio announcement never wait for a slowed frame's turn. A step is taken at most once a second, and while the lag
+  default `max_fps`, and at 400 ms both go at once. The interval is read when
+  the next frame is due, so a step the last frame's fence brings paces that
+  frame. The cursor, the audio announcement and a desktop that changed size
+  never wait for a slowed frame's turn. A step is taken at most once a second, and while the lag
   is still falling a fifth per second from the step before — the queue it
   left draining — no further step is taken, since the step was enough; after
   a keyframe the verdicts wait two seconds, since the frames behind it queue
