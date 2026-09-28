@@ -38,8 +38,8 @@
 //! it is blocking, and the fence keeps it to one frame in flight like any other
 //! update. Its quality starts at the configured one and follows the link
 //! ([`crate::quality`]): each frame's fence, answered once the client has the
-//! frame — wlshare's own client answers once its window has drawn it, so the
-//! walk reads the whole path to the screen — is how long that frame took, and
+//! frame — remotex answers once the browser has taken it, so the walk reads
+//! the whole path to the screen — is how long that frame took, and
 //! a client without Fence is measured by how long writing the frame blocked. The dial moves on the
 //! running encoder, so a move costs no keyframe. The walk only runs when a
 //! frame goes out, and a frame only goes out when something changed, so a
@@ -399,7 +399,7 @@ struct Session {
     /// What the VP9 stream is to be: its chroma, the ceiling of its quality
     /// and whether the walk moves it below, as the client's list asks
     /// ([`Vp9Stream`]). 4:4:4 at the configured quality, with the walk, for a
-    /// list that asks nothing — which is every desktop client's.
+    /// list that asks nothing.
     stream: Vp9Stream,
     /// The next VP9 frame must be a keyframe.
     keyframe_owed: bool,

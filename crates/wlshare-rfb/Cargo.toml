@@ -27,33 +27,17 @@ aes = "0.9"
 eax = "0.6"
 sha1 = "0.11"
 sha2 = "0.11"
-# The audio extension's FLAC frames, behind `encode`. Pure Rust; without its
-# default features, so no worker threads, serde or logging come with it.
-flacenc = { version = "0.5", default-features = false, optional = true }
-# The client's end of the same frames, behind `decode`: symphonia's decoder,
-# pure Rust, and only the FLAC bundle of it — `symphonia-core` for the decoder
-# trait and the packet it takes.
-symphonia-bundle-flac = { version = "0.6", optional = true }
-symphonia-core = { version = "0.6", optional = true }
+# The audio extension's FLAC frames. Pure Rust; without its default features,
+# so no worker threads, serde or logging come with it.
+flacenc = { version = "0.5", default-features = false }
 # The VP9 encoding's codec: the one place libvpx is spoken to, for this
-# workspace and for the remotex gateway, each pinned to its release tag. Not
-# behind a feature, since what a client lists beside the encoding
-# (`vp9::Vp9Stream`) names its chroma, and the daemon and the client both
-# take one of the features anyway.
+# workspace and for the remotex gateway, each pinned to its release tag.
 desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.2" }
 
-[features]
-# The server's FLAC encoder, `audio::FlacEncoder`, and VP9 encoder,
-# `vp9::Vp9Encoder`. Off by default, so a client, which only decodes, does not
-# build an encoder it never runs.
-encode = ["dep:flacenc"]
-# The client's FLAC decoder, `audio::FlacDecoder`, and VP9 decoder,
-# `vp9::Vp9Decoder`. Off by default, so the daemon, which only encodes, does not
-# build a decoder it never runs.
-decode = ["dep:symphonia-bundle-flac", "dep:symphonia-core"]
-
 [dev-dependencies]
-# The encoder's tests read every frame back with the client's decoder, which
-# shares nothing with flacenc, so they take both.
-wlshare-rfb = { path = ".", features = ["encode", "decode"] }
+# The FLAC encoder's tests read every frame back with symphonia's decoder,
+# which shares nothing with flacenc: pure Rust, and only the FLAC bundle of it
+# — `symphonia-core` for the decoder trait and the packet it takes.
+symphonia-bundle-flac = "0.6"
+symphonia-core = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }

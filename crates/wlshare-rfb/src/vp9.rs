@@ -1,5 +1,5 @@
-//! The VP9 encoding: the whole framebuffer as one VP9 stream, for a desktop
-//! client that would rather have a picture that moves than one that is exact.
+//! The VP9 encoding: the whole framebuffer as one VP9 stream, for a client
+//! that would rather have a picture that moves than one that is exact.
 //!
 //! A private encoding, [`crate::ENCODING_VP9`], which only a client that lists
 //! it is ever sent. Its rectangle always covers the whole framebuffer, and its
@@ -22,19 +22,15 @@
 //! per pixel, since the loss 4:2:0 costs a desktop is its text's colour and not
 //! its edges — unless the client listed [`ENCODING_VP9_SUBSAMPLED`] beside the
 //! encoding ([`Vp9Stream`]), which the remotex gateway does for a browser whose
-//! decoder takes only profile 0; wlshare's own desktop clients never do, and
-//! [`Vp9Decoder`] takes 4:4:4 alone. The quantizer is pinned by a 1–100 quality dial, which only the
-//! encoder's owner moves ([`Vp9Encoder::set_quality`]): no bitrate, no adaptive
-//! quantization, no dropped frames, so every frame is sent at exactly the
-//! dial's quality at the time. The client's pixel format does not apply to this
-//! encoding; what it decodes to is its own business, and [`Vp9Decoder`] writes
-//! `B, G, R, X`.
+//! decoder takes only profile 0. The quantizer is pinned by a 1–100 quality
+//! dial, which only the encoder's owner moves ([`Vp9Encoder::set_quality`]): no
+//! bitrate, no adaptive quantization, no dropped frames, so every frame is sent
+//! at exactly the dial's quality at the time. The client's pixel format does
+//! not apply to this encoding; what it decodes to is its own business.
 //!
 //! The coding itself is [`desktop_vp9`]'s, the one place libvpx is spoken to
-//! for wlshare and for the remotex gateway alike, behind `encode` on the
-//! server's side and `decode` on the client's. What this module owns is the
-//! framing — the length word and its ceiling — and the framebuffer's pixels in
-//! and out.
+//! for wlshare and for the remotex gateway alike. What this module owns is the
+//! framing — the length word and its ceiling — and the framebuffer's pixels in.
 
 use thiserror::Error;
 
@@ -42,8 +38,7 @@ pub use desktop_vp9::{Chroma, QUALITY_MAX, QUALITY_MIN};
 
 /// Listed beside [`crate::ENCODING_VP9`], asks for the stream at 4:2:0 (VP9
 /// profile 0) in place of 4:4:4: the ASCII bytes `WLS0`. The remotex gateway
-/// lists it for a browser whose decoder takes only profile 0; wlshare's own
-/// desktop clients never do, and [`Vp9Decoder`] takes 4:4:4 alone.
+/// lists it for a browser whose decoder takes only profile 0.
 pub const ENCODING_VP9_SUBSAMPLED: i32 = 0x574c_5330;
 
 /// Listed beside [`crate::ENCODING_VP9`] with a quality 1–100 added, names the
@@ -64,8 +59,8 @@ pub const ENCODING_VP9_HELD: i32 = 0x574c_5344;
 /// connection; and they ride the very list that names the encoding, so the first
 /// frame is already what was asked for. The remotex gateway lists them from the
 /// target's own keys, so that those keys mean on a passed stream what they mean
-/// on one the gateway codes itself; wlshare's own desktop clients list none, and
-/// a list without them is 4:4:4 at the server's `vp9_quality`, with the walk.
+/// on one the gateway codes itself. A list without them is 4:4:4 at the
+/// server's `vp9_quality`, with the walk.
 ///
 /// A change of chroma starts the stream over at a keyframe; a change of quality
 /// or of the walk moves the running encoder's dial without one.
@@ -95,7 +90,8 @@ impl Vp9Stream {
     /// The pseudo-encodings that ask for this stream, to list beside the
     /// encoding: the quality always, the other two where they differ from what
     /// a list without them means.
-    pub fn encodings(self) -> Vec<i32> {
+    #[cfg(test)]
+    fn encodings(self) -> Vec<i32> {
         let mut listed = vec![ENCODING_VP9_QUALITY_BASE + i32::from(self.quality)];
         if self.chroma == Chroma::Subsampled {
             listed.push(ENCODING_VP9_SUBSAMPLED);
@@ -107,16 +103,18 @@ impl Vp9Stream {
     }
 }
 
-/// Why a picture could not be encoded or a frame decoded.
+/// Why a picture could not be encoded, or in the tests a frame decoded.
 #[derive(Debug, Error)]
 pub enum Vp9Error {
     /// The codec, or the pixels in front of it, refused.
     #[error(transparent)]
     Codec(#[from] desktop_vp9::Error),
-    #[error("a frame of {0} bytes is over the {max}-byte ceiling", max = crate::client::MAX_RECT_BODY)]
+    #[error("a frame of {0} bytes is over the {max}-byte ceiling", max = crate::msg::MAX_RECT_BODY)]
     FrameTooLong(usize),
+    #[cfg(test)]
     #[error("the frame is {0}x{1} and its rectangle {2}x{3}")]
     Size(u32, u32, usize, usize),
+    #[cfg(test)]
     #[error("the frame is {0}, not the 4:4:4 this encoding carries")]
     Chroma(&'static str),
 }
@@ -128,7 +126,6 @@ pub enum Vp9Error {
 /// the compositor and the session, which are what make the next frame. Six
 /// threads on a six-core host coded a scrolling 4K frame in three quarters of
 /// the time three did, and a keyframe in a little over half.
-#[cfg(feature = "encode")]
 fn encoder_threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(2)).clamp(1, MAX_ENCODER_THREADS)
 }
@@ -141,13 +138,11 @@ fn encoder_threads() -> usize {
 /// megapixel: eight for 4K's 8.3. 4K is the largest desktop this is tuned
 /// for; a larger one is an edge case that streams, not a target, and gets the
 /// 4K count. Not measured past six threads, since the host had six cores.
-#[cfg(feature = "encode")]
 const MAX_ENCODER_THREADS: usize = 8;
 
-/// How many threads the decoder gets: half the machine, at most four. A
-/// decode gains nothing past the stream's tile columns, and the window still
-/// needs somewhere to draw.
-#[cfg(feature = "decode")]
+/// How many threads the tests' decoder gets: half the machine, at most four.
+/// A decode gains nothing past the stream's tile columns.
+#[cfg(test)]
 fn decoder_threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
 }
@@ -156,13 +151,11 @@ fn decoder_threads() -> usize {
 /// and the planes the framebuffer is converted into in front of it. A
 /// framebuffer of another size needs another encoder, whose first frame is a
 /// keyframe by construction.
-#[cfg(feature = "encode")]
 pub struct Vp9Encoder {
     encoder: desktop_vp9::Encoder,
     picture: desktop_vp9::Picture,
 }
 
-#[cfg(feature = "encode")]
 impl Vp9Encoder {
     /// An encoder for a `width`×`height` picture at `chroma` and `quality`
     /// (1–100).
@@ -218,7 +211,7 @@ impl Vp9Encoder {
             }
         }
         let len = out.len() - length_at - 4;
-        if len > crate::client::MAX_RECT_BODY {
+        if len > crate::msg::MAX_RECT_BODY {
             out.truncate(length_at);
             return Err(Vp9Error::FrameTooLong(len));
         }
@@ -227,17 +220,17 @@ impl Vp9Encoder {
     }
 }
 
-/// One connection's VP9 stream, client side: every VP9 rectangle is decoded
-/// by the same decoder, in the order they arrive, since each frame is coded
-/// against the ones before it.
-#[cfg(feature = "decode")]
-pub struct Vp9Decoder {
+/// One connection's VP9 stream, client side, which the tests read the encoder
+/// back with: every VP9 rectangle is decoded by the same decoder, in the order
+/// they arrive, since each frame is coded against the ones before it.
+#[cfg(test)]
+struct Vp9Decoder {
     decoder: desktop_vp9::Decoder,
 }
 
-#[cfg(feature = "decode")]
+#[cfg(test)]
 impl Vp9Decoder {
-    pub fn new() -> Result<Self, Vp9Error> {
+    fn new() -> Result<Self, Vp9Error> {
         Ok(Self { decoder: desktop_vp9::Decoder::new(decoder_threads())? })
     }
 
@@ -245,7 +238,7 @@ impl Vp9Decoder {
     /// of `width`×`height` pixels into `out`, whose first byte is the
     /// rectangle's first pixel and whose rows are `stride` bytes apart, as
     /// `B, G, R, X`.
-    pub fn decode_rect(&mut self, payload: &[u8], width: usize, height: usize, out: &mut [u8], stride: usize) -> Result<(), Vp9Error> {
+    fn decode_rect(&mut self, payload: &[u8], width: usize, height: usize, out: &mut [u8], stride: usize) -> Result<(), Vp9Error> {
         let decoded = self.decoder.decode(payload)?;
         let (w, h) = decoded.size();
         if (w as usize, h as usize) != (width, height) {
@@ -265,7 +258,7 @@ impl Vp9Decoder {
 /// coding itself is proved in `desktop-vp9`; what these hold is the half this
 /// module owns — the length word, its ceiling, the pixels in and out — and
 /// that a client's decoder refuses what the encoding does not carry.
-#[cfg(all(test, feature = "encode", feature = "decode"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -359,7 +352,7 @@ mod tests {
         assert!(matches!(encoder.encode_rect(&[0; 12], 128, false, &mut Vec::new()), Err(Vp9Error::Codec(desktop_vp9::Error::Buffer { .. }))));
 
         // A 4:2:0 frame, which the gateway asks for, is a VP9 frame of the
-        // same framing — and not one the desktop client's decoder carries.
+        // same framing — and not one a 4:4:4 decoder takes.
         let mut subsampled = Vp9Encoder::new(32, 16, Chroma::Subsampled, 60).unwrap();
         assert_eq!(subsampled.chroma(), Chroma::Subsampled);
         let frame = encode(&mut subsampled, &[0u8; 32 * 16 * 4], false);

@@ -42,8 +42,8 @@ resize = true
 max_fps = 60
 
 # The finest quality, 1-100, of the VP9 encoding: the whole desktop as one VP9
-# 4:4:4 stream, sent to a client that asks for it instead of ZRLE — wlshare's
-# own desktop clients do; remotex and other VNC clients never ask, and get ZRLE.
+# stream, sent to a client that asks for it instead of ZRLE — remotex does for
+# its browsers; other VNC clients never ask, and get ZRLE.
 # A session starts here and gives quality up while its client falls behind, then
 # frames, taking both back once the client keeps up, never past this — and at
 # once, as one frame, when a desktop left coarse has been quiet half a second.

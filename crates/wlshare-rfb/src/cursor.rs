@@ -93,7 +93,8 @@ impl CursorImage {
     /// The image a Cursor With Alpha rectangle carried, as a client reads it:
     /// the rectangle's x and y as the hotspot and its body as the pixels. `None`
     /// is the empty rectangle, which says there is no pointer to draw.
-    pub fn from_alpha_rect(width: u16, height: u16, hotspot: (u16, u16), rgba: Vec<u8>) -> Option<Self> {
+    #[cfg(test)]
+    fn from_alpha_rect(width: u16, height: u16, hotspot: (u16, u16), rgba: Vec<u8>) -> Option<Self> {
         assert_eq!(rgba.len(), usize::from(width) * usize::from(height) * 4, "a {width}x{height} RGBA image");
         if rgba.is_empty() {
             return None;
@@ -103,7 +104,8 @@ impl CursorImage {
 
     /// The image a standard Cursor rectangle carried: `pixels` in `format`, and
     /// the mask saying which of them are drawn, which become opaque.
-    pub fn from_masked_rect(format: &PixelFormat, width: u16, height: u16, hotspot: (u16, u16), pixels: &[u8], mask: &[u8]) -> Option<Self> {
+    #[cfg(test)]
+    fn from_masked_rect(format: &PixelFormat, width: u16, height: u16, hotspot: (u16, u16), pixels: &[u8], mask: &[u8]) -> Option<Self> {
         let w = usize::from(width);
         let mask_stride = w.div_ceil(8);
         assert_eq!(pixels.len(), w * usize::from(height) * 4, "a {width}x{height} image");

@@ -1,8 +1,7 @@
 //! wlshare's audio extension: how the desktop's sound reaches a client over the
 //! RFB connection it already has, as FLAC.
 //!
-//! The extension is private, and its clients are the remotex gateway and the
-//! macOS viewer:
+//! The extension is private, and its client is the remotex gateway:
 //!
 //! - The client lists the pseudo-encoding [`crate::ENCODING_AUDIO`] (`WLSF`) in
 //!   `SetEncodings`. The server announces support with an empty
@@ -18,7 +17,7 @@
 //! - The server sends [`audio_begin`] when a stream starts and [`audio_end`]
 //!   when it stops, QEMU's messages again, and between them the sound as FLAC
 //!   frames, one to a message of the private type [`MSG_AUDIO_FRAME`]
-//!   (`FlacEncoder`, behind the `encode` feature).
+//!   ([`FlacEncoder`]).
 //!
 //! FLAC is lossless: the client decodes exactly the samples the capture
 //! produced, while music and speech take about two-thirds of their PCM rate or
@@ -29,10 +28,9 @@
 //! Each frame decodes on its own, so one a session dropped costs nothing but
 //! its own samples.
 //!
-//! The client's half is here too: [`streaminfo`] is the header it builds, and
-//! `FlacDecoder`, behind the `decode` feature, turns each frame back into
-//! samples in the format it set.
-//! The messages themselves are framed and built in [`crate::client`].
+//! The tests read every frame back as a client does: `streaminfo` is the
+//! header it builds, and `FlacDecoder` turns each frame back into samples in
+//! the format it set.
 //!
 //! FLAC stores only signed samples, of at most 24 bits, so the formats are the
 //! four of 8 and 16 bits. An unsigned sample has its top bit flipped before it
@@ -41,15 +39,10 @@
 //! flip is its own inverse it gets the original values bit for bit. Samples are
 //! little-endian on both sides of the codec.
 
-#[cfg(feature = "encode")]
 use flacenc::bitsink::ByteSink;
-#[cfg(feature = "encode")]
 use flacenc::component::{BitRepr, StreamInfo};
-#[cfg(feature = "encode")]
 use flacenc::config;
-#[cfg(feature = "encode")]
 use flacenc::error::{Verified, Verify};
-#[cfg(feature = "encode")]
 use flacenc::source::{Fill, FrameBuf};
 use thiserror::Error;
 
@@ -258,9 +251,12 @@ pub fn audio_end() -> [u8; 4] {
 }
 
 /// Why a FLAC frame could not be made.
-#[cfg(feature = "encode")]
 #[derive(Debug, Error)]
 pub enum AudioEncodeError {
+    /// The format is not one the extension carries.
+    #[error(transparent)]
+    Unsupported(#[from] AudioParseError),
+    /// flacenc refused the format, carried as its message.
     #[error("FLAC cannot carry this format: {0}")]
     Format(String),
     /// flacenc's own error is neither `Send` nor `Sync`, so it is carried as
@@ -284,10 +280,9 @@ pub enum AudioEncodeError {
 /// | Offset | Type | Field |
 /// |---|---|---|
 /// | 0 | U8 | 0xE4 |
-/// | 1 | U8[3] | padding |
+/// | 1 | U8\[3\] | padding |
 /// | 4 | U32 | length of the frame |
 /// | 8 | U8[] | one FLAC frame |
-#[cfg(feature = "encode")]
 pub struct FlacEncoder {
     format: AudioFormat,
     config: Verified<config::Encoder>,
@@ -302,10 +297,9 @@ pub struct FlacEncoder {
     frame_number: usize,
 }
 
-#[cfg(feature = "encode")]
 impl FlacEncoder {
     pub fn new(format: AudioFormat) -> Result<Self, AudioEncodeError> {
-        format.check().map_err(|e| AudioEncodeError::Format(e.to_string()))?;
+        format.check()?;
         let block = format.block_frames();
         let bad = |e: flacenc::error::VerifyError| AudioEncodeError::Format(e.to_string());
         let mut info = StreamInfo::new(format.frequency as usize, usize::from(format.channels), 8 * format.sample.bytes()).map_err(bad)?;
@@ -367,7 +361,8 @@ impl FlacEncoder {
 /// server. The block size is [`AudioFormat::block_frames`] at both ends, and
 /// the frame sizes, the total and the MD5 are unknown. A format
 /// [`AudioFormat::check`] refuses has no header.
-pub fn streaminfo(format: AudioFormat) -> Result<[u8; 34], AudioParseError> {
+#[cfg(test)]
+fn streaminfo(format: AudioFormat) -> Result<[u8; 34], AudioParseError> {
     format.check()?;
     let block = (format.block_frames() as u16).to_be_bytes();
     let mut info = [0u8; 34];
@@ -382,9 +377,12 @@ pub fn streaminfo(format: AudioFormat) -> Result<[u8; 34], AudioParseError> {
 }
 
 /// Why a FLAC frame could not be read back.
-#[cfg(feature = "decode")]
+#[cfg(test)]
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum AudioDecodeError {
+enum AudioDecodeError {
+    /// The format is not one the extension carries.
+    #[error(transparent)]
+    Unsupported(#[from] AudioParseError),
     /// symphonia's own error is carried as its message, as flacenc's is.
     #[error("FLAC cannot carry this format: {0}")]
     Format(String),
@@ -394,26 +392,26 @@ pub enum AudioDecodeError {
     Shape { got: usize, channels: usize, want: usize, expected: usize },
 }
 
-/// One stream's decoder, the client's end of `FlacEncoder`: the frame a
+/// One stream's decoder, the client's end of [`FlacEncoder`]: the frame a
 /// [`MSG_AUDIO_FRAME`] message carries in, interleaved little-endian samples in
 /// the client's format out. Made at a begin, from the format that was set.
 ///
 /// Every frame decodes on its own, so a frame that fails costs its own twenty
 /// milliseconds and the decoder goes on with the next.
-#[cfg(feature = "decode")]
-pub struct FlacDecoder {
+#[cfg(test)]
+struct FlacDecoder {
     format: AudioFormat,
     decoder: symphonia_bundle_flac::FlacDecoder,
     samples: Vec<i32>,
 }
 
-#[cfg(feature = "decode")]
+#[cfg(test)]
 impl FlacDecoder {
-    pub fn new(format: AudioFormat) -> Result<Self, AudioDecodeError> {
+    fn new(format: AudioFormat) -> Result<Self, AudioDecodeError> {
         use symphonia_core::codecs::audio::well_known::CODEC_ID_FLAC;
         use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 
-        let info = streaminfo(format).map_err(|e| AudioDecodeError::Format(e.to_string()))?;
+        let info = streaminfo(format)?;
         let mut params = AudioCodecParameters::new();
         params.for_codec(CODEC_ID_FLAC).with_extra_data(Box::new(info));
         let decoder = symphonia_bundle_flac::FlacDecoder::try_new(&params, &AudioDecoderOptions::default())
@@ -421,15 +419,11 @@ impl FlacDecoder {
         Ok(Self { format, decoder, samples: Vec::new() })
     }
 
-    pub fn format(&self) -> AudioFormat {
-        self.format
-    }
-
     /// One frame — the bytes after a message's header — as
     /// [`AudioFormat::block_frames`] frames of interleaved little-endian
     /// samples in the format the stream was set to, bit for bit what the
     /// server captured.
-    pub fn decode(&mut self, frame: &[u8]) -> Result<Vec<u8>, AudioDecodeError> {
+    fn decode(&mut self, frame: &[u8]) -> Result<Vec<u8>, AudioDecodeError> {
         use symphonia_core::codecs::audio::AudioDecoder as _;
         use symphonia_core::packet::Packet;
         use symphonia_core::units::{Duration, Timestamp};
@@ -573,8 +567,8 @@ mod tests {
             (AudioFormat { frequency: 1 << 20, ..good }, AudioParseError::FrequencyTooHigh(1 << 20)),
         ] {
             assert_eq!(streaminfo(format), Err(error.clone()));
-            assert!(matches!(FlacEncoder::new(format), Err(AudioEncodeError::Format(_))));
-            assert_eq!(FlacDecoder::new(format).err(), Some(AudioDecodeError::Format(error.to_string())));
+            assert!(matches!(FlacEncoder::new(format), Err(AudioEncodeError::Unsupported(e)) if e == error));
+            assert_eq!(FlacDecoder::new(format).err(), Some(AudioDecodeError::Unsupported(error.clone())));
             assert_eq!(crate::client::audio_set_format(&format), Err(error));
         }
     }

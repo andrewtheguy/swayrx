@@ -36,7 +36,7 @@ pub struct Config {
     /// The most frames captured per second.
     #[serde(default = "default_max_fps")]
     pub max_fps: u32,
-    /// The finest quality, 1–100, of the VP9 encoding a desktop client may ask
+    /// The finest quality, 1–100, of the VP9 encoding a client may ask
     /// for instead of ZRLE ([`wlshare_rfb::vp9`]). A session starts there and
     /// gives quality up while its client falls behind (`desktop_vp9::walk`),
     /// then frames, from a floor of the encoder's own; a desktop that has gone

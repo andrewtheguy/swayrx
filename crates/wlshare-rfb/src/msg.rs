@@ -55,6 +55,10 @@ pub const EDS_STATUS_INVALID_LAYOUT: u16 = 3;
 /// Cut text longer than this is refused rather than buffered.
 pub const MAX_CUT_TEXT: usize = 16 * 1024 * 1024;
 
+/// The most bytes one rectangle may carry: past any framebuffer a desktop has,
+/// and short of what a length field gone wrong would have a client buffer.
+pub const MAX_RECT_BODY: usize = 512 * 1024 * 1024;
+
 /// One screen of an ExtendedDesktopSize layout, or of a SetDesktopSize request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Screen {

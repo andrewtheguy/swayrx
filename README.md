@@ -2,9 +2,9 @@
 
 A VNC server for wlroots-based Wayland compositors, built for the
 [remotex](https://github.com/andrewtheguy/remotex) gateway. It captures one
-output through wlr-screencopy, serves it over RFB 3.8 with ZRLE — or, to one of
-wlshare's own desktop clients that asks, as a VP9 4:4:4 stream at a quality
-that follows the link — injects input through the virtual keyboard and pointer protocols,
+output through wlr-screencopy, serves it over RFB 3.8 with ZRLE — or, to a
+client that asks, as remotex does for its browsers, as one VP9 stream at a
+quality that follows the link — injects input through the virtual keyboard and pointer protocols,
 shares the clipboard through wlr-data-control, carries the desktop's sound from
 PipeWire over the connection itself — and tells the client what pixel density the
 framebuffer is drawn at, which standard RFB cannot, so a `scale 2` output is
@@ -108,14 +108,13 @@ the server resolves the client's keysyms through the same keymap it uploads.
 
 ## Building
 
-The workspace has three crates: `wlshare-rfb`, the protocol, and
-`wlshare-client`, the session the macOS and Windows clients are built on, which
-both build and test anywhere, and `wlshare`, the daemon, which needs libwayland,
+The workspace has two crates: `wlshare-rfb`, the protocol, which builds and
+tests anywhere, and `wlshare`, the daemon, which needs libwayland,
 libxkbcommon, libpipewire and libavcodec and only runs under a wlroots-based
 Wayland compositor. The VP9 coding under them is
 [desktop-vp9](https://github.com/andrewtheguy/desktop-vp9), shared with the
 remotex gateway and pinned by its release tag. A bare `cargo test` covers the
-first two; build the daemon with
+first; build the daemon with
 `cargo build --release -p wlshare` on a Linux host with `libwayland-dev`,
 `libxkbcommon-dev`, `libpam0g-dev`, `libpipewire-0.3-dev`, `libspa-0.2-dev`,
 `libavcodec-dev`, `libclang-dev` and `pkg-config`. libclang links nothing:

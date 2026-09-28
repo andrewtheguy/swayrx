@@ -22,10 +22,9 @@
 //! text is UTF-8 with CRLF line endings and a terminating NUL; here it is a
 //! `String` with LF line endings, and [`provide`] and [`parse`] convert.
 //!
-//! Every body built here is framed by [`crate::msg::server_extended_cut_text`]
-//! or [`crate::client::client_extended_cut_text`], and every one received is
-//! the body [`crate::msg::ClientMsg::ExtendedCutText`] or
-//! [`crate::client::ServerMsg::ExtendedCutText`] carries.
+//! Every body built here is framed by [`crate::msg::server_extended_cut_text`],
+//! and every one received is the body [`crate::msg::ClientMsg::ExtendedCutText`]
+//! carries.
 
 use std::io::{Read as _, Write as _};
 
