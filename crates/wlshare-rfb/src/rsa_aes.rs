@@ -1,7 +1,8 @@
 //! RealVNC's RSA-AES security types (RFB 5 and 129), both ends: an
 //! authenticated, encrypted RFB session over an ordinary 3.8 wire, and the one
 //! standard way a client can tell this server *who* is connecting.
-//! [`authenticate`] is the server's half and [`begin`] the client's.
+//! [`authenticate`] is the server's half; the client's, `begin`, is the one
+//! the tests run it against.
 //!
 //! The types are RealVNC's, documented in the community `rfbproto` and spoken
 //! on the open side by TigerVNC, neatvnc and the remotex gateway, whose client
@@ -103,8 +104,6 @@ pub const SECURITY_RSA_AES_256: u8 = 129;
 /// Bits in the key generated for a server without one. TigerVNC's and
 /// wayvnc's size; the exchange lets the two ends' sizes differ.
 pub const SERVER_KEY_BITS: usize = 2048;
-/// Bits in the key a client makes for one session: TigerVNC's size.
-pub const CLIENT_KEY_BITS: usize = 2048;
 /// Bounds on the other end's key, TigerVNC's. Below the lower one the random it
 /// carries is not protected; above the upper one a bogus length turns into a
 /// very large allocation and a very slow exponentiation.
@@ -138,6 +137,7 @@ impl Subtype {
         }
     }
 
+    #[cfg(test)]
     fn of(byte: u8) -> Option<Self> {
         match byte {
             1 => Some(Self::UserPass),
@@ -435,18 +435,14 @@ pub async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 /// The key a client makes for one session and forgets with it.
-pub struct ClientKey {
+#[cfg(test)]
+struct ClientKey {
     private: RsaPrivateKey,
     wire: WireKey,
 }
 
+#[cfg(test)]
 impl ClientKey {
-    /// A fresh [`CLIENT_KEY_BITS`]-bit key. Real CPU time, so make it before
-    /// connecting rather than on the server's handshake clock.
-    pub fn generate() -> Result<Self, rsa::Error> {
-        Self::of_bits(CLIENT_KEY_BITS)
-    }
-
     fn of_bits(bits: usize) -> Result<Self, rsa::Error> {
         let private = RsaPrivateKey::new(&mut rand::rng(), bits)?;
         let wire = WireKey::of_public(private.as_public_key());
@@ -459,7 +455,8 @@ impl ClientKey {
 /// [`Self::fingerprint`] is the server meant and to answer [`Self::subtype`]
 /// with [`Self::login`]. The decision comes first — the credentials go to
 /// whoever holds that key.
-pub struct Exchange {
+#[cfg(test)]
+struct Exchange {
     session: Session,
     fingerprint: String,
     subtype: Subtype,
@@ -472,7 +469,8 @@ pub struct Exchange {
 /// decrypt is safe only because the key dies with the connection that refused
 /// it. Answer the same key twice and the refusals become a padding oracle, so
 /// a second exchange has to be a second key.
-pub async fn begin<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+#[cfg(test)]
+async fn begin<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut R,
     writer: &mut W,
     strength: Strength,
@@ -527,22 +525,23 @@ pub async fn begin<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(Exchange { session: Session { sealer, opener }, fingerprint: server_wire.fingerprint(), subtype })
 }
 
+#[cfg(test)]
 impl Exchange {
     /// RealVNC's display of the server's key, to compare with the one the
     /// server logged at startup or the one seen last time.
-    pub fn fingerprint(&self) -> &str {
+    fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
 
     /// Which credentials the server wants.
-    pub fn subtype(&self) -> Subtype {
+    fn subtype(&self) -> Subtype {
         self.subtype
     }
 
     /// Answer the server's question. The username goes out empty to a server
     /// that asked for a password alone. What comes back is the transport
     /// SecurityResult and everything after it arrive over.
-    pub async fn login<W: AsyncWrite + Unpin>(mut self, writer: &mut W, credentials: &Credentials) -> Result<Session, Error> {
+    async fn login<W: AsyncWrite + Unpin>(mut self, writer: &mut W, credentials: &Credentials) -> Result<Session, Error> {
         let username = match self.subtype {
             Subtype::UserPass => credentials.username.as_str(),
             Subtype::Password => "",
@@ -643,7 +642,7 @@ impl Sealer {
         Self { cipher, counter: [0; 16] }
     }
 
-    /// Frame a message, cutting it at [`MAX_FRAME_BODY`]. An empty message is
+    /// Frame a message, cutting it at 8192 bytes (`MAX_FRAME_BODY`). An empty message is
     /// no frame at all — nothing has ever needed to send one, and a reader that
     /// receives one has only a counter to advance for it.
     pub fn frame(&mut self, msg: &[u8]) -> Vec<u8> {

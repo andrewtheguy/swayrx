@@ -17,15 +17,16 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
   is the one place libvpx is spoken to: the encoder configuration a desktop is
   coded with, the planes in front of it at either chroma, the decoder, what a
   frame says about itself, and the quality walk. It has no platform dependency,
-  and a change to how a desktop is coded is made there once for the daemon, the
-  desktop client and the gateway, and reaches each as a pin bump. See
+  and a change to how a desktop is coded is made there once for the daemon and
+  the gateway, and reaches each as a pin bump. See
   [The VP9 encoding](#the-vp9-encoding).
 - `crates/wlshare-rfb` decides every byte on the wire: handshake, message parsing
   and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding's
   framing over `desktop-vp9`, the density, outputs, camera and microphone
   extensions. It has no platform dependency and its tests decode every encoder's
-  output with an independent decoder written from the RFC, and run the RSA-AES
-  exchange against a client written from the specification.
+  output with an independent decoder, read every server message back with a
+  client's parser, and run the RSA-AES exchange against a client written from
+  the specification.
 - `crates/wlshare` is the daemon. `compositor.rs` is the Wayland thread and its
   command handler; `capture.rs`, `cursor.rs`, `outputs.rs`, `input.rs` and
   `clipboard.rs` are the protocols it speaks; `audio.rs`, `camera.rs` and
@@ -33,31 +34,9 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
   `framebuffer.rs` is the shared pixels and damage;
   `session.rs` is one client; `auth.rs` checks an RSA-AES login and `pam.rs` is
   the system half of that check; `shared.rs` is what crosses between them.
-- `crates/wlshare-client` is the other end: the desktop client the macOS and
-  Windows apps (`wlshare-macos`, `wlshare-windows`) are built on, everything
-  but the window. See [The desktop client](#the-desktop-client).
 
-## The desktop client
-
-`wlshare-client` is the session the native apps run: the handshake, the
-density and resize rules, VP9 or ZRLE decoded into a framebuffer and its
-damage, the pointer's shape, the clipboard both ways and the sound into a
-playback buffer — the daemon's `session.rs` read from the other end, every
-byte of it through `wlshare-rfb`. `Client::connect` runs it on a thread of its
-own; the window reads pixels, the cursor, the clipboard and the sound under
-short locks and posts input as commands.
-
-Each app keeps what is about its platform in a small core of its own on top of
-this crate: the table that turns its key events into keysyms, the gathering of
-its scrolls into wheel notches, and the C ABI its app calls in through — a
-static library and a C header on macOS, a DLL and P/Invoke on Windows. Those
-cores depend on `wlshare-client` by this repository's release tag, and it
-re-exports `wlshare-rfb`, so an app moves one tag. A change to how a client
-behaves on the wire is made here once, for both, and reaches them as a release.
-
-Like `wlshare-rfb` it has no platform dependency and a bare `cargo test` covers
-it; its live tests (`tests/live_session.rs`, ignored by default) talk to a
-real wlshare.
+Its client is the remotex gateway, which every viewer reaches the desktop
+through.
 
 ## One session at a time
 
@@ -216,9 +195,9 @@ next update waits for the echo. One update is in flight at a time, so a slow
 link is never flooded and frames coalesce in the framebuffer meanwhile. remotex
 negotiates both ContinuousUpdates and Fence.
 
-What the echo means is the client's to decide, and `wlshare-client` holds it
-until its *window* has taken the frame rather than answering from the decoder
-([below](#the-desktop-clients-paint)).
+What the echo means is the client's to decide, and remotex holds it while the
+picture is the VP9 stream until the browser has taken the frame, rather than
+answering the moment it arrives ([below](#the-clients-paint)).
 
 A size change goes out first, as its own update — an ExtendedDesktopSize
 rectangle whose reason says who asked (the server, this client, another
@@ -230,8 +209,8 @@ update too, and waits for a request like any other.
 
 ## The VP9 encoding
 
-A private encoding, `WLSV` (`0x574c5356`), for wlshare's own desktop clients
-and the remotex gateway: the whole desktop as one VP9 stream, for a client that
+A private encoding, `WLSV` (`0x574c5356`), for the remotex gateway: the whole
+desktop as one VP9 stream, for a client that
 would rather have a picture that moves than one that is exact. remotex lists it
 for every browser and passes each frame to the browser as it came, since it is
 the stream remotex would otherwise encode from ZRLE's pixels — at the chroma
@@ -262,8 +241,7 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   and no quantizer puts it back. The gateway asks for 4:2:0 (profile 0) for a
   browser whose decoder takes nothing else, since a stream that browser refuses
   by name carries no colour at all, by listing `WLS0` beside the encoding
-  (below); wlshare's own desktop clients never ask, and their decoder takes
-  4:4:4 alone.
+  (below).
 - **BT.601 at studio swing**, converted from the framebuffer's `B, G, R, X` and
   declared in the keyframe header, so a decoder converts back with the same
   matrix. The client's pixel format does not apply.
@@ -279,8 +257,8 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   off to the frame rate, and the settle below sharpens a quiet desktop back at
   `vp9_quality`.
   A frame's queueing is its fence's round trip — answered once the client has
-  the frame, which for wlshare's own client means once its window has drawn it
-  ([below](#the-desktop-clients-paint)) — less the shortest of the last
+  the frame, which for remotex means once the browser has taken it
+  ([below](#the-clients-paint)) — less the shortest of the last
   minute's, so distance does not read as queueing; a keyframe counts towards
   that floor but is no verdict. Without Fence — and for a held dial, fence or
   no fence — it is how long writing the frame blocked, 20 ms of it being behind. Two
@@ -319,8 +297,8 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   `SetEncodings`, and owed a frame whether or not the desktop changed: a new
   chroma starts the stream over at a keyframe, a new ceiling moves the running
   encoder's dial and sends the picture once at it, as a settle does, and a new
-  walk moves the dial alone. A list that names none of them — every desktop
-  client's — is 4:4:4 at `vp9_quality` with the walk.
+  walk moves the dial alone. A list that names none of them is 4:4:4 at
+  `vp9_quality` with the walk.
   Screen-content tuning, libvpx's
   realtime speed 7, no lag, and threads with row and tile parallelism: the
   machine's cores less two, at most eight, for the encoder, since an encode
@@ -363,31 +341,24 @@ fence keeps one frame in flight as it does any update. A `SetEncodings` that
 drops the encoding is answered with the whole framebuffer in ZRLE, since the
 client is holding a lossy picture.
 
-libvpx comes from `libvpx-prebuilt`'s static archive, through desktop-vp9, behind
-`wlshare-rfb`'s `encode` and `decode` features.
+libvpx comes from `libvpx-prebuilt`'s static archive, through desktop-vp9.
 
-### The desktop client's paint
+### The client's paint
 
 The walk above is only as honest as the fence it times, and a fence echoed the
-moment a frame is decoded times the link and the decoder and nothing else. A
-window that cannot upload a 4K frame as fast as the desktop draws one would
-read as a healthy client: the server would keep coding at the dial, the window
-would keep overwriting frames it never showed, and the person would watch a
-picture that lags while every measurement said the link was clear.
+moment a frame arrives times the link to the gateway and nothing else. A
+browser that cannot take frames as fast as the desktop draws them would read as
+a healthy client: the server would keep coding at the dial, and the person
+would watch a picture that lags while every measurement said the link was
+clear.
 
-So `wlshare-client` holds the echo until the window has taken the pixels —
-`Client::with_frame` handing back damage is the acknowledgment, the same shape
-as the `paintAck` remotex's browser sends after its painter draws. The whole
-path a frame takes to the screen is then inside the round trip the walk reads,
-and, because the server sends nothing until the echo arrives, a frame the
-window would only have overwritten unseen is never encoded at all.
-
-A window that is not drawing must not be able to stop the desktop, so the echo
-goes out unheld after 500 ms — `PAINT_GRACE`, remotex's `PAINT_WINDOW_GRACE` —
-and the window is then counted as one that is not drawing: the fences after it
-are echoed at once, and the desktop keeps streaming at whatever the link bears
-until the first paint puts the window back in the loop. A hidden window costs
-the session nothing and never drags the quality down with it.
+So remotex holds each echo for what the browser's link makes of the frames
+before it, measured by the `paintAck` the browser sends after its painter
+draws. The path a frame takes to the screen is then inside the round trip the
+walk reads, and, because the server sends nothing until the echo arrives, a
+frame the browser would only have overwritten unseen is never encoded at all.
+A browser that is not drawing must not be able to stop the desktop, so no echo
+is held past 500 ms — remotex's `FENCE_HOLD_LIMIT`, its paint window's grace.
 
 ## The density extension
 
@@ -487,7 +458,7 @@ which is where the gateway's half of this lives.
 
 The desktop's sound, as FLAC, on the connection the pixels use. It is private —
 pseudo-encoding `0x574c5346` (`WLSF`) and server message type `0xE4` — and its
-clients are the remotex gateway and the macOS viewer. The client's messages and the stream's
+client is the remotex gateway. The client's messages and the stream's
 begin and end are borrowed from the QEMU Audio extension `rfbproto` registers,
 message type `255` submessage `1`; QEMU's pseudo-encoding, `-259`, is not
 spoken, because what it promises is raw samples and none are sent. A client that
@@ -526,13 +497,9 @@ capture produced.
 FLAC is lossless, so the gateway's Opus encode stays the only lossy step, while
 music and speech cost about two-thirds of their 1.5 Mbit/s PCM rate or less and
 a silent desktop a few bytes a frame. `wlshare-rfb` encodes with `flacenc`, and
-decodes with symphonia's decoder, which shares nothing with it — the client's
-half, `audio::FlacDecoder` beside `audio::streaminfo`, is what the encoder's
-tests read every frame back with. The encoder is behind the crate's `encode`
-feature and the decoder behind `decode`: the daemon turns on the one, a client
-the other. A frame length past 64 KiB is fatal to a
-client: the largest block there is, 20 ms of 16-bit stereo at 96 kHz, is 7680
-bytes before compression.
+its tests read every frame back with symphonia's decoder, which shares nothing
+with it. A frame length past 64 KiB is fatal to a client: the largest block
+there is, 20 ms of 16-bit stereo at 96 kHz, is 7680 bytes before compression.
 
 While any client listens the host is silent, the way a remote desktop's sound
 is: the desktop plays into the **speaker**, a sink of wlshare's own, rather than
@@ -814,7 +781,7 @@ Tight, TightPNG, Hextile, RRE, CopyRect and every lossy encoding but the VP9
 one: the gateway re-encodes every tile anyway, and ZRLE is the standard's best
 lossless choice. A VP9 quality above the ceiling the stream was asked for
 however much room the link has, the VP9 encoding for any client that does not
-list it, and 4:2:0 for wlshare's own desktop client, which has no use for it.
+list it.
 8- and 16-bit pixel formats and colour maps. Moving the client's pointer: the
 PointerPos pseudo-encoding would carry a warp the compositor made, and the
 cursor session does report positions, but only when the output repaints.

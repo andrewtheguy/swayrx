@@ -1785,17 +1785,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wlshare-client"
-version = "0.0.42"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "tokio",
- "wlshare-rfb",
-]
-
-[[package]]
 name = "wlshare-rfb"
 version = "0.0.42"
 dependencies = [
@@ -1814,7 +1803,6 @@ dependencies = [
  "symphonia-core",
  "thiserror",
  "tokio",
- "wlshare-rfb",
 ]
 
 [[package]]

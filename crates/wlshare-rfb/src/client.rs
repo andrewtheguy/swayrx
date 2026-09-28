@@ -1,20 +1,15 @@
-//! The client's half of the wire: the messages a client sends, built into
-//! bytes, and the server's, parsed from a byte buffer.
+//! The client's half of the wire, which the tests read the server's with: the
+//! messages a client sends, built into bytes, and the server's, parsed from a
+//! byte buffer.
 //!
-//! This is [`crate::msg`] seen from the other end, for a client of this server
-//! — it frames exactly what wlshare sends and nothing a server of another kind
-//! might. The builders are checked against [`crate::msg::parse`], and the parser
-//! against the builders the daemon sends with, so neither half is tested against
-//! itself.
+//! This is [`crate::msg`] seen from the other end — it frames exactly what
+//! wlshare sends and nothing a server of another kind might. The builders are
+//! checked against [`crate::msg::parse`], and the parser against the builders
+//! the daemon sends with, so neither half is tested against itself.
 //!
 //! Parsing is incremental, as the server's is: [`parse`] looks at the front of
 //! whatever has been read and returns a message and its length, asks for more,
-//! or fails — after which the connection is over, RFB having no framing to skip
-//! an unknown message by. A rectangle's pixels are framed here and decoded
-//! elsewhere: Raw bytes are the pixels, a ZRLE payload goes to
-//! [`crate::zrle::ZrleDecoder`], a VP9 frame to `vp9::Vp9Decoder`, behind the
-//! `decode` feature, a cursor to [`crate::cursor::CursorImage`],
-//! and a FLAC frame to `audio::FlacDecoder`, behind the `decode` feature.
+//! or fails. A rectangle's pixels are framed here and not decoded.
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
@@ -26,7 +21,7 @@ use crate::audio::{
 use crate::density::{CLIENT_DENSITY_LEN, MSG_DENSITY, to_fixed};
 use crate::msg::{
     CLIENT_ENABLE_CONTINUOUS_UPDATES, CLIENT_FENCE, CLIENT_FRAMEBUFFER_UPDATE_REQUEST, CLIENT_KEY_EVENT, CLIENT_POINTER_EVENT,
-    CLIENT_SET_DESKTOP_SIZE, CLIENT_SET_ENCODINGS, CLIENT_SET_PIXEL_FORMAT, FENCE_MAX_PAYLOAD, MAX_CUT_TEXT, SERVER_CUT_TEXT,
+    CLIENT_SET_DESKTOP_SIZE, CLIENT_SET_ENCODINGS, CLIENT_SET_PIXEL_FORMAT, FENCE_MAX_PAYLOAD, MAX_CUT_TEXT, MAX_RECT_BODY, SERVER_CUT_TEXT,
     SERVER_END_OF_CONTINUOUS_UPDATES, SERVER_FENCE, SERVER_FRAMEBUFFER_UPDATE, Screen,
 };
 use crate::pixel::PixelFormat;
@@ -83,12 +78,6 @@ pub async fn read_security_result<R: AsyncRead + Unpin>(reader: &mut R) -> Resul
         0 => Ok(()),
         _ => Err(HandshakeError::Failed(read_text(reader).await?)),
     }
-}
-
-/// ClientInit. The shared flag changes nothing at this server, whose desktop is
-/// one client's either way.
-pub fn client_init() -> [u8; 1] {
-    [1]
 }
 
 /// What a ServerInit says: the framebuffer as it is now, the format pixels
@@ -254,20 +243,15 @@ pub fn audio_set_format(format: &AudioFormat) -> Result<[u8; CLIENT_AUDIO_FORMAT
 
 // ── Server messages ──────────────────────────────────────────────────────────
 
-/// The most bytes one rectangle may carry: past any framebuffer a desktop has,
-/// and short of what a length field gone wrong would have a client buffer.
-pub const MAX_RECT_BODY: usize = 512 * 1024 * 1024;
-
 /// What a rectangle of a FramebufferUpdate carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RectBody {
     /// Pixels in the format last set, four bytes each, rows top down.
     Raw(Vec<u8>),
-    /// A ZRLE payload without its length word, for the connection's
-    /// [`crate::zrle::ZrleDecoder`].
+    /// A ZRLE payload without its length word.
     Zrle(Vec<u8>),
-    /// One VP9 frame without its length word, for the connection's
-    /// `vp9::Vp9Decoder`; the rectangle is the whole framebuffer.
+    /// One VP9 frame without its length word; the rectangle is the whole
+    /// framebuffer.
     Vp9(Vec<u8>),
     /// The framebuffer is now the rectangle's width and height.
     DesktopSize,
@@ -312,8 +296,7 @@ pub enum ServerMsg {
     AudioBegin,
     /// The audio extension: the stream stopped.
     AudioEnd,
-    /// The audio extension: one FLAC frame, without its message header, for
-    /// the stream's `audio::FlacDecoder`.
+    /// The audio extension: one FLAC frame, without its message header.
     AudioFrame(Vec<u8>),
 }
 

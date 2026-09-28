@@ -2,11 +2,9 @@
 //!
 //! Everything that decides bytes on the socket lives here and nowhere else: the
 //! handshake pieces, the client messages and how they parse, the server messages
-//! and how they are built, RSA-AES, the ZRLE encoder and the private extensions
-//! — and, in [`client`], [`zrle::ZrleDecoder`] and [`rsa_aes::begin`], the same
-//! wire from a client's end. The daemon crate turns compositor events into calls
-//! on this crate and copies the results to sockets, and the client crate does the
-//! same with a window's; neither writes a protocol byte of its own.
+//! and how they are built, RSA-AES, the ZRLE encoder and the private extensions.
+//! The daemon crate turns compositor events into calls on this crate and copies
+//! the results to sockets; it writes no protocol byte of its own.
 //!
 //! The crate is platform-independent so that all of it is unit-tested on any
 //! machine, the daemon being buildable only where libwayland and libxkbcommon
@@ -19,12 +17,12 @@
 //!
 //! - **ZRLE, and VP9 for a client that lists it.** ZRLE is the standard's best
 //!   lossless encoding, every client worth naming decodes it, and the remotex
-//!   gateway asks for it first. **The VP9 encoding** is a private one for
-//!   wlshare's own desktop clients and the gateway: the whole framebuffer as one
-//!   VP9 stream, 4:4:4 at a quality its owner sets unless the client asked for
-//!   otherwise ([`vp9`]), for a desktop that moves. Raw is
-//!   produced only before the client's first `SetEncodings`, where the RFC
-//!   requires it, and for a client whose list names neither. Tight, Hextile,
+//!   gateway asks for it first. **The VP9 encoding** is a private one for the
+//!   gateway: the whole framebuffer as one VP9 stream, 4:4:4 at a quality its
+//!   owner sets unless the client asked for otherwise ([`vp9`]), for a desktop
+//!   that moves. Raw is produced only before the client's first
+//!   `SetEncodings`, where the RFC requires it, and for a client whose list
+//!   names neither. Tight, Hextile,
 //!   RRE, CopyRect and every other lossy encoding are absent.
 //! - **32-bit true colour only.** The server's native format is the compositor's
 //!   XRGB8888, which is the `B, G, R, X` byte order the gateway forces. A client may
@@ -65,7 +63,8 @@
 
 pub mod audio;
 pub mod camera;
-pub mod client;
+#[cfg(test)]
+mod client;
 pub mod clipboard;
 pub mod cursor;
 pub mod density;

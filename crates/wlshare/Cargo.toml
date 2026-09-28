@@ -11,7 +11,7 @@ name = "wlshare"
 path = "src/main.rs"
 
 [dependencies]
-wlshare-rfb = { path = "../wlshare-rfb", features = ["encode"] }
+wlshare-rfb = { path = "../wlshare-rfb" }
 # The quality walk, the same one the remotex gateway runs on its own streams.
 desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.2" }
 anyhow.workspace = true
