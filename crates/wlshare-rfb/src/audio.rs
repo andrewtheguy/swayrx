@@ -253,6 +253,10 @@ pub fn audio_end() -> [u8; 4] {
 /// Why a FLAC frame could not be made.
 #[derive(Debug, Error)]
 pub enum AudioEncodeError {
+    /// The format is not one the extension carries.
+    #[error(transparent)]
+    Unsupported(#[from] AudioParseError),
+    /// flacenc refused the format, carried as its message.
     #[error("FLAC cannot carry this format: {0}")]
     Format(String),
     /// flacenc's own error is neither `Send` nor `Sync`, so it is carried as
@@ -295,7 +299,7 @@ pub struct FlacEncoder {
 
 impl FlacEncoder {
     pub fn new(format: AudioFormat) -> Result<Self, AudioEncodeError> {
-        format.check().map_err(|e| AudioEncodeError::Format(e.to_string()))?;
+        format.check()?;
         let block = format.block_frames();
         let bad = |e: flacenc::error::VerifyError| AudioEncodeError::Format(e.to_string());
         let mut info = StreamInfo::new(format.frequency as usize, usize::from(format.channels), 8 * format.sample.bytes()).map_err(bad)?;
@@ -376,6 +380,9 @@ fn streaminfo(format: AudioFormat) -> Result<[u8; 34], AudioParseError> {
 #[cfg(test)]
 #[derive(Debug, Error, PartialEq, Eq)]
 enum AudioDecodeError {
+    /// The format is not one the extension carries.
+    #[error(transparent)]
+    Unsupported(#[from] AudioParseError),
     /// symphonia's own error is carried as its message, as flacenc's is.
     #[error("FLAC cannot carry this format: {0}")]
     Format(String),
@@ -404,7 +411,7 @@ impl FlacDecoder {
         use symphonia_core::codecs::audio::well_known::CODEC_ID_FLAC;
         use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 
-        let info = streaminfo(format).map_err(|e| AudioDecodeError::Format(e.to_string()))?;
+        let info = streaminfo(format)?;
         let mut params = AudioCodecParameters::new();
         params.for_codec(CODEC_ID_FLAC).with_extra_data(Box::new(info));
         let decoder = symphonia_bundle_flac::FlacDecoder::try_new(&params, &AudioDecoderOptions::default())
@@ -560,8 +567,8 @@ mod tests {
             (AudioFormat { frequency: 1 << 20, ..good }, AudioParseError::FrequencyTooHigh(1 << 20)),
         ] {
             assert_eq!(streaminfo(format), Err(error.clone()));
-            assert!(matches!(FlacEncoder::new(format), Err(AudioEncodeError::Format(_))));
-            assert_eq!(FlacDecoder::new(format).err(), Some(AudioDecodeError::Format(error.to_string())));
+            assert!(matches!(FlacEncoder::new(format), Err(AudioEncodeError::Unsupported(e)) if e == error));
+            assert_eq!(FlacDecoder::new(format).err(), Some(AudioDecodeError::Unsupported(error.clone())));
             assert_eq!(crate::client::audio_set_format(&format), Err(error));
         }
     }
