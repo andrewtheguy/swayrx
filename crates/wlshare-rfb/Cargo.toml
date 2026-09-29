@@ -32,7 +32,7 @@ sha2 = "0.11"
 flacenc = { version = "0.5", default-features = false }
 # The VP9 encoding's codec: the one place libvpx is spoken to, for this
 # workspace and for the remotex gateway, each pinned to its release tag.
-desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.2" }
+desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.4" }
 
 [dev-dependencies]
 # The FLAC encoder's tests read every frame back with symphonia's decoder,
