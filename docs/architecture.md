@@ -22,11 +22,11 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
   [The VP9 encoding](#the-vp9-encoding).
 - `crates/wlshare-rfb` decides every byte on the wire: handshake, message parsing
   and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding's
-  framing over `desktop-vp9`, the density, outputs, camera and microphone
-  extensions. It has no platform dependency and its tests decode every encoder's
-  output with an independent decoder, read every server message back with a
-  client's parser, and run the RSA-AES exchange against a client written from
-  the specification.
+  framing over `desktop-vp9`, the cursor and clipboard encodings, and the
+  density, outputs, audio, camera and microphone extensions. It has no platform
+  dependency and its tests decode every encoder's output with an independent
+  decoder, read every server message back with a client's parser, and run the
+  RSA-AES exchange against a client written from the specification.
 - `crates/wlshare` is the daemon. `compositor.rs` is the Wayland thread and its
   command handler; `capture.rs`, `cursor.rs`, `outputs.rs`, `input.rs` and
   `clipboard.rs` are the protocols it speaks; `audio.rs`, `camera.rs` and
@@ -183,17 +183,20 @@ wanted, and retries rather than serving a frozen picture.
 
 ## Sending pixels
 
-A client gets an update when it has asked (`FramebufferUpdateRequest`, or once
-for all with continuous updates) and there is damage. Each update is one
-`FramebufferUpdate` of merged rectangles, at most 32, ZRLE-encoded on the
-client's own deflate stream, or Raw before the client's first `SetEncodings` and
-for a client that never lists ZRLE — or, for a client that lists the VP9
-encoding, one rectangle of the whole framebuffer ([below](#the-vp9-encoding)).
+A client gets a pixel update when it has asked (`FramebufferUpdateRequest`, or
+once for all with continuous updates) and there is damage. Each pixel update is
+one `FramebufferUpdate` of merged rectangles, at most 32, ZRLE-encoded on the
+client's own deflate stream, or Raw before the client's first `SetEncodings`
+and for a client whose list names neither ZRLE nor VP9 — or, for a client that
+lists the VP9 encoding, one rectangle of the whole framebuffer
+([below](#the-vp9-encoding)).
 
-With Fence negotiated, every update ends with a fence the client echoes, and the
-next update waits for the echo. One update is in flight at a time, so a slow
-link is never flooded and frames coalesce in the framebuffer meanwhile. remotex
-negotiates both ContinuousUpdates and Fence.
+With Fence negotiated, every pixel update ends with a fence the client echoes,
+and the next pixel round waits for the echo. Cursor, audio and geometry
+announcements sent with a request precede any pixels for it and have no fences
+of their own. One pixel round is in flight at a time, so a slow link is never
+flooded and frames coalesce in the framebuffer meanwhile. remotex negotiates
+both ContinuousUpdates and Fence.
 
 What the echo means is the client's to decide, and remotex holds it while the
 picture is the VP9 stream until the browser has taken the frame, rather than
@@ -211,15 +214,16 @@ update too, and waits for a request like any other.
 
 A private encoding, `WLSV` (`0x574c5356`), for the remotex gateway: the whole
 desktop as one VP9 stream, for a client that
-would rather have a picture that moves than one that is exact. remotex lists it
-for every browser and passes each frame to the browser as it came, since it is
-the stream remotex would otherwise encode from ZRLE's pixels — at the chroma
-the browser's decoder takes and the target's own dial, which it names beside
-the encoding, below. No other VNC client lists it, so nothing changes for them.
+would rather have a picture that moves than one that is exact. While the
+framebuffer is within its video ceiling, remotex lists it for every browser and
+passes each frame to the browser as it came, since it is the stream remotex would
+otherwise encode from ZRLE's pixels — at the chroma the browser's decoder takes
+and the target's own dial, which it names beside the encoding, below. A client
+that does not list it is unchanged.
 
-A client that lists it gets it instead of ZRLE, wherever in the list it is. Each
-update is then one rectangle covering the whole framebuffer, whose body is a
-length word and one VP9 frame:
+A client that lists it gets it instead of a standard pixel encoding, wherever
+in the list it is. Each pixel update is then one rectangle covering the whole
+framebuffer, whose body is a length word and one VP9 frame:
 
 ```text
 u32 length   the frame's bytes
@@ -309,8 +313,8 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   the AVX2 or NEON path the machine has: a scalar loop over a 4K frame was a
   fifth of an encode and a third of a decode.
 - **A quiet desktop is sharpened at `vp9_quality`, and the walk keeps its
-  place.** The walk only runs when a frame goes out, and a frame only goes out
-  when something changed, so a desktop that stops right after the link
+  place.** The walk only runs when a frame goes out. Ordinarily a frame only
+  goes out when something changed, so a desktop that stops right after the link
   coarsened it would keep that picture until it changed again. Once a frame
   encoded below `vp9_quality` has been delivered — its fence answered, or
   without Fence its write finished — and nothing has been sent for 500 ms
@@ -330,16 +334,18 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   quiet after one sends nothing. remotex's settle for its own whole-desktop
   streams.
 - **Keyframes only when a decoder needs one**: the first frame after the
-  encoding is listed, the first at a new size (the encoder is made again for
-  it), and the frame that answers a non-incremental request. There is no
-  periodic keyframe; nothing is lost on TCP.
+  encoding is listed, the first at a new size or chroma (the encoder is made
+  again for it), and the frame that answers a non-incremental request. There is
+  no periodic keyframe; nothing is lost on TCP.
 
-An update is sent when anything is damaged, and the frame is the whole picture:
-the encoder's inter-frame coding is what makes an unchanged region cost nothing.
-The encode runs on the session's worker, which is told it is blocking, and the
-fence keeps one frame in flight as it does any update. A `SetEncodings` that
-drops the encoding is answered with the whole framebuffer in ZRLE, since the
-client is holding a lossy picture.
+A normal VP9 update is sent when anything is damaged; a non-incremental request,
+a chroma or quality-ceiling change and the settle described above can also owe
+one. The frame is the whole picture: the encoder's inter-frame coding is what
+makes an unchanged region cost nothing. The encode runs on the session's worker,
+which is told it is blocking, and the fence keeps one frame in flight as it does
+a standard pixel update. A `SetEncodings` that drops the encoding is answered
+with the whole framebuffer in the standard encoding it selected — ZRLE when
+listed, Raw otherwise — since the client is holding a lossy picture.
 
 libvpx comes from `libvpx-prebuilt`'s static archive, through desktop-vp9.
 
@@ -538,11 +544,11 @@ across so the host is not heard between the two captures, and a disable or a
 disconnect stops it; what is left of a frame goes with it.
 
 The session drains that queue before every framebuffer update, so sound is never
-held behind a ZRLE frame it was ready before. A headless session needs no sink
+held behind a pixel update it was ready before. A headless session needs no sink
 of its own: the speaker is one.
 
-The announcement is off unless the configuration sets `audio = true`, and while
-it is, a client that lists the pseudo-encoding is told nothing.
+The announcement is off unless the configuration sets `audio = true`; while it
+is off, a client that lists the pseudo-encoding is told nothing.
 
 ## The camera extension
 
@@ -625,8 +631,8 @@ xdg-desktop-portal 1.20.3: with only `xdg-desktop-portal-wlr` installed, the
 portal exported no `org.freedesktop.portal.Camera`, and with
 `xdg-desktop-portal-gtk` added and the portal restarted, it did.
 
-The announcement is off unless the configuration sets `camera = true`, and while
-it is, a client that lists the pseudo-encoding is told nothing.
+The announcement is off unless the configuration sets `camera = true`; while it
+is off, a client that lists the pseudo-encoding is told nothing.
 
 ## The microphone extension
 
@@ -684,8 +690,8 @@ two. Each recording sent start as it linked and stop as it left; past the first
 half second both held the tone at 440 Hz with no silent 10 ms block, and the node
 was gone from the graph after the unplug.
 
-The announcement is off unless the configuration sets `microphone = true`, and
-while it is, a client that lists the pseudo-encoding is told nothing.
+The announcement is off unless the configuration sets `microphone = true`;
+while it is off, a client that lists the pseudo-encoding is told nothing.
 
 ## Resize
 

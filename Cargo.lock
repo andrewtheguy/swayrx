@@ -555,8 +555,8 @@ dependencies = [
 
 [[package]]
 name = "desktop-vp9"
-version = "0.0.4"
-source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.4#1647f6d0dfe2d5e019c7c64a6be037519331e048"
+version = "0.0.5"
+source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.5#b4f1c659d9d48c0ee9f821de7b275ba0e854622b"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",
@@ -1757,7 +1757,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "wlshare"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "wlshare-rfb"
-version = "0.0.44"
+version = "0.0.45"
 dependencies = [
  "aes",
  "desktop-vp9",

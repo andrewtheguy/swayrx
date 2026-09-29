@@ -8,7 +8,7 @@
 //!
 //! The desktop is one client's. Finishing the handshake takes it, and the
 //! session that held it ends — it watches the compositor's `active` client
-//! rather than an [`Event`](crate::shared::Event), so a session too far behind
+//! rather than an [`Event`], so a session too far behind
 //! to read the broadcast cannot go on holding a desktop it no longer has. The
 //! watch races the message loop as a whole rather than being looked at between
 //! passes of it, so a client that has stopped reading its socket is cut off in
@@ -21,35 +21,38 @@
 //!
 //! ## Sending pixels
 //!
-//! A client gets a FramebufferUpdate when it has asked for one — with a
+//! A client gets pixels when it has asked for them — with a
 //! `FramebufferUpdateRequest`, or once for all by enabling continuous updates —
 //! and there is something to send: damage since the generation it last saw, or
 //! everything after a non-incremental request or a resize. With Fence
-//! negotiated, one update is in flight at a time: each ends with a fence the
-//! client echoes, and the next waits for the echo, so a slow link is never
-//! flooded and the compositor's frames coalesce in the framebuffer meanwhile.
-//! Without Fence, TCP's own backpressure paces it.
+//! negotiated, one pixel round is in flight at a time: its pixel update ends
+//! with a fence the client echoes, and the next round waits for the echo. Cursor,
+//! audio and geometry announcements sent with a request precede any pixels for
+//! it and have no fences of their own.
+//! A slow link is therefore never flooded and the compositor's frames coalesce
+//! in the framebuffer meanwhile. Without Fence, TCP's own backpressure paces it.
 //!
-//! A client that lists the VP9 encoding gets every update as one rectangle
+//! A client that lists the VP9 encoding gets every pixel update as one rectangle
 //! over the whole framebuffer, the next frame of one VP9 stream
-//! ([`wlshare_rfb::vp9`]). The encoder is made again at every new size, whose
-//! first frame is a keyframe, and a non-incremental request or the encoding's
-//! being listed anew asks for one. The encode runs on this task's worker, told
-//! it is blocking, and the fence keeps it to one frame in flight like any other
-//! update. Its quality starts at the configured one and follows the link
-//! ([`crate::quality`]): each frame's fence, answered once the client has the
-//! frame — remotex answers once the browser has taken it, so the walk reads
-//! the whole path to the screen — is how long that frame took, and
-//! a client without Fence is measured by how long writing the frame blocked. The dial moves on the
-//! running encoder, so a move costs no keyframe. The walk only runs when a
-//! frame goes out, and a frame only goes out when something changed, so a
-//! desktop that stops right after the link coarsened it would keep that
-//! picture: once a frame below the configured quality has been delivered and
-//! nothing has changed for [`SETTLE_IDLE`], the dial is taken back to the
-//! configured quality and the unchanged picture is sent again as one inter
-//! frame, which sharpens every block without a keyframe. A list that drops
-//! VP9 is answered with the whole framebuffer in ZRLE, since the picture the
-//! client has is a lossy one.
+//! ([`wlshare_rfb::vp9`]). The encoder is made again at every new size or chroma,
+//! whose first frame is a keyframe; a non-incremental request or the encoding's
+//! being listed anew also asks for one. The encode runs on this task's worker,
+//! told it is blocking, and the fence keeps it to one frame in flight as it does
+//! a standard pixel update. Its quality starts at the configured one and follows
+//! the link through desktop-vp9's quality walk: each frame's fence, answered
+//! once the client has the frame — remotex answers once the browser has taken
+//! it, so the walk reads the whole path to the screen — is how long that frame
+//! took, and a client without Fence is measured by how long writing the frame
+//! blocked. The dial moves on the running encoder, so a move costs no keyframe.
+//! Ordinarily a frame only goes out when something changed, so a desktop that
+//! stops right after the link coarsened it would keep that picture. Once a frame
+//! below the configured quality has been delivered and nothing has changed for
+//! [`SETTLE_IDLE`], the dial is taken back to the configured quality and the
+//! unchanged picture is sent again as one inter frame, which sharpens every
+//! block without a keyframe. A list that drops VP9
+//! is answered with the whole framebuffer in the standard encoding it selected
+//! — ZRLE when listed, Raw otherwise — since the picture the client has is a
+//! lossy one.
 //!
 //! A size change goes out first, as its own update, and the whole framebuffer
 //! follows in the next. A client that negotiated neither ExtendedDesktopSize nor
@@ -394,7 +397,7 @@ struct Session {
     /// The VP9 stream's encoder, at the framebuffer's size once a frame has
     /// been sent.
     vp9: Option<Vp9Encoder>,
-    /// The client listed the VP9 encoding, which it then gets instead of ZRLE.
+    /// The client listed the VP9 encoding, which it gets instead of Raw or ZRLE.
     use_vp9: bool,
     /// What the VP9 stream is to be: its chroma, the ceiling of its quality
     /// and whether the walk moves it below, as the client's list asks
