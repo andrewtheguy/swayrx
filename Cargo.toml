@@ -11,7 +11,7 @@ default-members = ["crates/wlshare-rfb"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.43"
+version = "0.0.44"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/andrewtheguy/wlshare"
