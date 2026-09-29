@@ -2,8 +2,8 @@
 
 A VNC server for wlroots-based Wayland compositors, built for the
 [remotex](https://github.com/andrewtheguy/remotex) gateway. It captures one
-output through wlr-screencopy, serves it over RFB 3.8 with ZRLE — or, to a
-client that asks, as remotex does for its browsers, as one VP9 stream at a
+output through wlr-screencopy, serves it over RFB 3.8 with Raw or ZRLE — or, to
+a client that asks, as remotex does for its browsers, as one VP9 stream at a
 quality that follows the link — injects input through the virtual keyboard and pointer protocols,
 shares the clipboard through wlr-data-control, carries the desktop's sound from
 PipeWire over the connection itself — and tells the client what pixel density the
@@ -25,9 +25,11 @@ the virtual keyboard, virtual pointer, and `wlr-data-control` protocols when the
 compositor offers them. Keeping the cursor separate on a headless output, and
 capturing it, requires wlroots 0.19 or newer.
 
-Any VNC client that decodes ZRLE and advertises the standard Cursor
-pseudo-encoding can connect. Cursor support is required because wlshare never
-puts the pointer in framebuffer pixels. The density and outputs extensions
+At the framebuffer layer, any RFB 3.8 client that advertises the standard Cursor
+pseudo-encoding and can draw Raw rectangles can connect. ZRLE is used when
+listed unless the client also asks for wlshare's private VP9 stream. A configured
+login additionally requires RSA-AES. Cursor support is required because wlshare
+never puts the pointer in framebuffer pixels. The density and outputs extensions
 are asked for by the client and stay silent otherwise; remotex asks for both on
 every plain `vnc` target. Audio is a private extension that remotex asks for when a target has
 `audio = true`: while it listens wlshare's own sink is the default, so every
@@ -71,8 +73,9 @@ systemctl --user enable --now wlshare.service
 ```
 
 Configuration is one TOML file, `$XDG_CONFIG_HOME/wlshare/config.toml` by
-default; every key has a default and [`packaging/config.example.toml`](packaging/config.example.toml)
-lists them.
+default. An empty file uses defaults, and
+[`packaging/config.example.toml`](packaging/config.example.toml) lists every
+setting.
 
 Who may connect is one setting, and there are three answers. Nothing set: anyone
 who reaches the port is in, and the session is in the clear, so `listen` stays on

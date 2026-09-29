@@ -15,21 +15,20 @@
 //!
 //! RFB 3.8 as RFC 6143 has it, with these choices:
 //!
-//! - **ZRLE, and VP9 for a client that lists it.** ZRLE is the standard's best
-//!   lossless encoding, every client worth naming decodes it, and the remotex
-//!   gateway asks for it first. **The VP9 encoding** is a private one for the
+//! - **Raw or ZRLE, and VP9 for a client that lists it.** ZRLE is the standard's
+//!   best lossless encoding, and the remotex gateway lists it as its first
+//!   standard pixel encoding. **The VP9 encoding** is a private one for the
 //!   gateway: the whole framebuffer as one VP9 stream, 4:4:4 at a quality its
 //!   owner sets unless the client asked for otherwise ([`vp9`]), for a desktop
-//!   that moves. Raw is produced only before the client's first
-//!   `SetEncodings`, where the RFC requires it, and for a client whose list
-//!   names neither. Tight, Hextile,
-//!   RRE, CopyRect and every other lossy encoding are absent.
+//!   that moves. Raw is produced before the client's first `SetEncodings`, where
+//!   the RFC requires it, and for a client whose list names neither. Tight,
+//!   Hextile, RRE, CopyRect and every other lossy encoding are absent.
 //! - **32-bit true colour only.** The server's native format is the compositor's
 //!   XRGB8888, which is the `B, G, R, X` byte order the gateway forces. A client may
 //!   ask for any 32-bit true-colour format with 8-bit channels and gets it by a
 //!   swizzle; 8- and 16-bit formats and colour maps are refused.
 //! - **ContinuousUpdates and Fence**, so a client that supports them gets frames
-//!   as the screen changes with one update in flight, instead of polling.
+//!   as the screen changes with one pixel update in flight, instead of polling.
 //! - **Cursor**, required of every client, so the compositor pointer stays out
 //!   of captured pixels and its shape moves immediately at the client; and
 //!   **Cursor With Alpha**, for a client that lists it, so the shape keeps its

@@ -1,5 +1,6 @@
 # wlshare configuration: $XDG_CONFIG_HOME/wlshare/config.toml by default.
-# Every key is optional; the values shown are the defaults unless noted.
+# Every top-level key and table is optional; the values shown are the defaults
+# unless noted. An enabled [password] table requires its hash.
 
 # Where clients connect. Without [pam] or [password] below the session is
 # unauthenticated and not encrypted: keep this on loopback or a VPN address, or
@@ -42,8 +43,9 @@ resize = true
 max_fps = 60
 
 # The finest quality, 1-100, of the VP9 encoding: the whole desktop as one VP9
-# stream, sent to a client that asks for it instead of ZRLE — remotex does for
-# its browsers; other VNC clients never ask, and get ZRLE.
+# stream, sent to a client that asks for it instead of a standard pixel encoding
+# — remotex does for its browsers. Without VP9, a client that lists ZRLE gets
+# ZRLE, with Raw as the fallback.
 # A session starts here and gives quality up while its client falls behind, then
 # frames, taking both back once the client keeps up, never past this — and at
 # once, as one frame, when a desktop left coarse has been quiet half a second.
@@ -91,6 +93,8 @@ name = "wlshare"
 # XKB rules/model/layout/variant/options names. Empty means the library default.
 # A custom layout directory is named by XKB_CONFIG_EXTRA_PATH in the environment.
 [xkb]
+# rules = ""
+# model = ""
 # layout = "us"
 # variant = ""
 # options = ""
