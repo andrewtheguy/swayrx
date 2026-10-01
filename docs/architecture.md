@@ -215,8 +215,8 @@ update too, and waits for a request like any other.
 A private encoding, `WLSV` (`0x574c5356`), for the remotex gateway: the whole
 desktop as one VP9 stream, for a client that
 would rather have a picture that moves than one that is exact. While the
-framebuffer is within its video ceiling, remotex lists it for every browser and
-passes each frame to the browser as it came, since it is the stream remotex would
+framebuffer is within its video ceiling, remotex lists it for every browser on a
+target with `subtype = "wlshare"` and passes each frame to the browser as it came, since it is the stream remotex would
 otherwise encode from ZRLE's pixels — at the chroma the browser's decoder takes
 and the target's own dial, which it names beside the encoding, below. A client
 that does not list it is unchanged.
