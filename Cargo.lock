@@ -509,8 +509,8 @@ dependencies = [
 
 [[package]]
 name = "desktop-flac"
-version = "0.0.1"
-source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.1#27ff2a57d52654c4058344882edb4430d03d43c3"
+version = "0.0.2"
+source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.2#05960c018d49154fc67aff5a8872923a496ccec6"
 dependencies = [
  "libloading 0.9.0",
  "thiserror",
