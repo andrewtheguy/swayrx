@@ -786,7 +786,9 @@ character the client has already cased — remotex never forwards Caps Lock and
 sends `A` or `a` as the browser resolved it — so before each press the server
 checks what the keycode would produce under the current modifiers, and presses
 Shift or lets a held Shift go around the key when the keycode alone would type
-the other case. A keysym that names a key rather than a printable character is
+the other case. A Shift pressed for a key goes up with the key unless the client
+has since pressed that Shift key itself, which makes it the client's to let go
+of. A keysym that names a key rather than a printable character is
 exempt and goes out on its keycode under whatever the client holds: Shift+Tab
 arrives as Shift then `Tab`, the keycode's shifted level is `ISO_Left_Tab`, and
 letting Shift go to make it produce `Tab` would type a plain Tab.

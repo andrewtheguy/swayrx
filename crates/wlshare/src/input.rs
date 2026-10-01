@@ -97,9 +97,19 @@ impl Modifiers {
     }
 }
 
-pub struct Input {
-    keyboard: ZwpVirtualKeyboardV1,
-    pointer: ZwlrVirtualPointerV1,
+/// One key transition for the compositor, with the modifier state that follows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sent {
+    code: u32,
+    down: bool,
+    depressed: u32,
+    latched: u32,
+    locked: u32,
+    layout: u32,
+}
+
+/// The client's keysyms turned into the key transitions the compositor is sent.
+struct Keys {
     modifiers: Modifiers,
     /// Keysym → the keycode (and level) that produces it, preferring level 0.
     keycodes: HashMap<u32, (u32, u32)>,
@@ -109,33 +119,21 @@ pub struct Input {
     held: HashSet<u32>,
     /// Keys pressed with Shift corrected around them.
     fixes: HashMap<u32, ShiftFix>,
+    /// The transitions of the call under way.
+    sent: Vec<Sent>,
+}
+
+pub struct Input {
+    keyboard: ZwpVirtualKeyboardV1,
+    pointer: ZwlrVirtualPointerV1,
+    keys: Keys,
     /// The client's RFB button mask.
     buttons: u8,
     started: Instant,
 }
 
-impl Input {
-    pub fn new(
-        qh: &QueueHandle<Compositor>,
-        keyboards: &ZwpVirtualKeyboardManagerV1,
-        pointers: &ZwlrVirtualPointerManagerV1,
-        seat: &WlSeat,
-        output: &WlOutput,
-        xkb_config: &Xkb,
-    ) -> anyhow::Result<Self> {
-        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        let options = if xkb_config.options.is_empty() { None } else { Some(xkb_config.options.clone()) };
-        let keymap = xkb::Keymap::new_from_names(
-            &context,
-            &xkb_config.rules,
-            &xkb_config.model,
-            &xkb_config.layout,
-            &xkb_config.variant,
-            options,
-            xkb::KEYMAP_COMPILE_NO_FLAGS,
-        )
-        .ok_or_else(|| anyhow::anyhow!("no keymap compiles from {xkb_config:?}"))?;
-
+impl Keys {
+    fn new(keymap: &xkb::Keymap) -> Self {
         let mut keycodes = HashMap::new();
         let min = keymap.min_keycode().raw();
         let max = keymap.max_keycode().raw();
@@ -157,56 +155,30 @@ impl Input {
         if shift_codes.is_empty() {
             warn!("the keymap has no Shift key: case cannot be corrected");
         }
-
-        let text = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
-        let fd = rustix::fs::memfd_create("wlshare-keymap", rustix::fs::MemfdFlags::CLOEXEC).context("memfd for the keymap")?;
-        let mut file = std::fs::File::from(fd);
-        std::io::Write::write_all(&mut file, text.as_bytes())?;
-        std::io::Write::write_all(&mut file, b"\0")?;
-        let keyboard = keyboards.create_virtual_keyboard(seat, qh, ());
-        keyboard.keymap(1, file.as_fd(), (text.len() + 1) as u32);
-
-        let pointer = pointers.create_virtual_pointer_with_output(Some(seat), Some(output), qh, ());
-        Ok(Self {
-            keyboard,
-            pointer,
-            modifiers: Modifiers::new(&keymap),
-            keycodes,
-            shift_codes,
-            held: HashSet::new(),
-            fixes: HashMap::new(),
-            buttons: 0,
-            started: Instant::now(),
-        })
+        Self { modifiers: Modifiers::new(keymap), keycodes, shift_codes, held: HashSet::new(), fixes: HashMap::new(), sent: Vec::new() }
     }
 
-    fn time(&self) -> u32 {
-        self.started.elapsed().as_millis() as u32
-    }
-
-    pub fn key(&mut self, keysym: u32, down: bool) {
+    /// A KeyEvent, as the transitions to send for it.
+    fn key(&mut self, keysym: u32, down: bool) -> Vec<Sent> {
         let Some(&(code, level)) = self.keycodes.get(&keysym) else {
             warn!("no key produces keysym {keysym:#x}; dropped");
-            return;
+            return Vec::new();
         };
         if down {
-            if !self.held.insert(code) {
-                // A repeat: the state is as the first press left it, and
-                // stays so -- see [`Modifiers`].
-                self.send_key(code, true);
-                return;
+            if self.held.insert(code) {
+                self.fix_shift(code, level, keysym);
             }
-            self.fix_shift(code, level, keysym);
+            // A repeat goes out too: the state is as the first press left it,
+            // and stays so -- see [`Modifiers`].
             self.send_key(code, true);
-        } else {
-            if !self.held.remove(&code) {
-                // A release of something not held: the compositor counts the
-                // state anyway, so send it as it is.
-                self.send_key(code, false);
-                return;
-            }
+        } else if self.held.remove(&code) {
             self.release(code);
+        } else {
+            // A release of something not held: the compositor counts the
+            // state anyway, so send it as it is.
+            self.send_key(code, false);
         }
+        std::mem::take(&mut self.sent)
     }
 
     /// Press or let go of Shift so that `code` types `keysym`: the keycode
@@ -247,10 +219,22 @@ impl Input {
     }
 
     /// A key the client let go of, or lost by leaving.
+    ///
+    /// The Shift pressed for a key is the client's own once the client presses
+    /// that Shift key itself, and is then left down for the client to let go of.
+    /// A Shift key the client lets go of is one a key's fix no longer holds
+    /// either, so it goes up there and then, and not a second time with the key.
     fn release(&mut self, code: u32) {
+        if self.shift_codes.contains(&code) {
+            self.fixes.retain(|_, fix| !matches!(fix, ShiftFix::Pressed(shift) if *shift == code));
+        }
         self.send_key(code, false);
         match self.fixes.remove(&code) {
-            Some(ShiftFix::Pressed(shift)) => self.send_key(shift, false),
+            Some(ShiftFix::Pressed(shift)) => {
+                if !self.held.contains(&shift) {
+                    self.send_key(shift, false);
+                }
+            }
             Some(ShiftFix::Released(shifts)) => {
                 for shift in shifts {
                     if self.held.contains(&shift) {
@@ -263,16 +247,82 @@ impl Input {
     }
 
     fn send_key(&mut self, code: u32, down: bool) {
-        let time = self.time();
-        self.keyboard.key(time, code - EVDEV_OFFSET, u32::from(down));
         self.modifiers.key(code, down);
         let state = &self.modifiers.state;
-        self.keyboard.modifiers(
-            state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
-            state.serialize_mods(xkb::STATE_MODS_LATCHED),
-            state.serialize_mods(xkb::STATE_MODS_LOCKED),
-            state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
-        );
+        self.sent.push(Sent {
+            code,
+            down,
+            depressed: state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
+            latched: state.serialize_mods(xkb::STATE_MODS_LATCHED),
+            locked: state.serialize_mods(xkb::STATE_MODS_LOCKED),
+            layout: state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
+        });
+    }
+
+    /// Let go of every key the client left held.
+    fn release_all(&mut self) -> Vec<Sent> {
+        for code in std::mem::take(&mut self.held) {
+            self.release(code);
+        }
+        std::mem::take(&mut self.sent)
+    }
+}
+
+impl Input {
+    pub fn new(
+        qh: &QueueHandle<Compositor>,
+        keyboards: &ZwpVirtualKeyboardManagerV1,
+        pointers: &ZwlrVirtualPointerManagerV1,
+        seat: &WlSeat,
+        output: &WlOutput,
+        xkb_config: &Xkb,
+    ) -> anyhow::Result<Self> {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let options = if xkb_config.options.is_empty() { None } else { Some(xkb_config.options.clone()) };
+        let keymap = xkb::Keymap::new_from_names(
+            &context,
+            &xkb_config.rules,
+            &xkb_config.model,
+            &xkb_config.layout,
+            &xkb_config.variant,
+            options,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .ok_or_else(|| anyhow::anyhow!("no keymap compiles from {xkb_config:?}"))?;
+
+        let text = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+        let fd = rustix::fs::memfd_create("wlshare-keymap", rustix::fs::MemfdFlags::CLOEXEC).context("memfd for the keymap")?;
+        let mut file = std::fs::File::from(fd);
+        std::io::Write::write_all(&mut file, text.as_bytes())?;
+        std::io::Write::write_all(&mut file, b"\0")?;
+        let keyboard = keyboards.create_virtual_keyboard(seat, qh, ());
+        keyboard.keymap(1, file.as_fd(), (text.len() + 1) as u32);
+
+        let pointer = pointers.create_virtual_pointer_with_output(Some(seat), Some(output), qh, ());
+        Ok(Self {
+            keyboard,
+            pointer,
+            keys: Keys::new(&keymap),
+            buttons: 0,
+            started: Instant::now(),
+        })
+    }
+
+    fn time(&self) -> u32 {
+        self.started.elapsed().as_millis() as u32
+    }
+
+    pub fn key(&mut self, keysym: u32, down: bool) {
+        let sent = self.keys.key(keysym, down);
+        self.send_keys(&sent);
+    }
+
+    fn send_keys(&mut self, sent: &[Sent]) {
+        let time = self.time();
+        for key in sent {
+            self.keyboard.key(time, key.code - EVDEV_OFFSET, u32::from(key.down));
+            self.keyboard.modifiers(key.depressed, key.latched, key.locked, key.layout);
+        }
     }
 
     /// The button mask the compositor sees.
@@ -326,9 +376,8 @@ impl Input {
     }
 
     pub fn release_all(&mut self) {
-        for code in std::mem::take(&mut self.held) {
-            self.release(code);
-        }
+        let sent = self.keys.release_all();
+        self.send_keys(&sent);
         let before = self.buttons_down();
         self.buttons = 0;
         let after = self.buttons_down();
@@ -348,15 +397,68 @@ wayland_client::delegate_noop!(Compositor: ignore ZwlrVirtualPointerV1);
 mod tests {
     use xkbcommon::xkb;
 
-    use super::{EVDEV_OFFSET, Modifiers, is_character};
+    use super::{EVDEV_OFFSET, Keys, Modifiers, Sent, is_character};
 
     /// The evdev codes of Left Shift, Left Control, Left Alt and Left Meta.
     const MODIFIER_KEYS: [u32; 4] = [42, 29, 56, 125];
 
-    fn modifiers() -> Modifiers {
+    /// The keycodes of Left Shift, Tab and A, and Shift's bit in the modifier mask.
+    const SHIFT: u32 = 42 + EVDEV_OFFSET;
+    const TAB: u32 = 15 + EVDEV_OFFSET;
+    const A: u32 = 30 + EVDEV_OFFSET;
+    const SHIFT_MASK: u32 = 1;
+    const XK_SHIFT_L: u32 = 0xffe1;
+    const XK_TAB: u32 = 0xff09;
+    const XK_UPPER_A: u32 = 0x41;
+
+    fn keymap() -> xkb::Keymap {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        let keymap = xkb::Keymap::new_from_names(&context, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS).expect("the us layout compiles");
-        Modifiers::new(&keymap)
+        xkb::Keymap::new_from_names(&context, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS).expect("the us layout compiles")
+    }
+
+    fn modifiers() -> Modifiers {
+        Modifiers::new(&keymap())
+    }
+
+    /// What reached the compositor: each keycode, its direction, and the
+    /// depressed modifiers reported after it.
+    fn wire(sent: Vec<Sent>) -> Vec<(u32, bool, u32)> {
+        sent.into_iter().map(|key| (key.code, key.down, key.depressed)).collect()
+    }
+
+    #[test]
+    fn a_shift_the_client_takes_over_outlives_the_key_it_was_pressed_for() {
+        let mut keys = Keys::new(&keymap());
+        // `A` with no Shift held, as under Caps Lock: Shift is pressed for it.
+        assert_eq!(wire(keys.key(XK_UPPER_A, true)), [(SHIFT, true, SHIFT_MASK), (A, true, SHIFT_MASK)]);
+        // The client presses that Shift itself, and it repeats.
+        for _ in 0..3 {
+            assert_eq!(wire(keys.key(XK_SHIFT_L, true)), [(SHIFT, true, SHIFT_MASK)]);
+        }
+        // Letting go of `A` leaves the Shift the client now holds.
+        assert_eq!(wire(keys.key(XK_UPPER_A, false)), [(A, false, SHIFT_MASK)]);
+        // So the Tab that follows is Shift+Tab.
+        assert_eq!(wire(keys.key(XK_TAB, true)), [(TAB, true, SHIFT_MASK)]);
+        assert_eq!(wire(keys.key(XK_TAB, false)), [(TAB, false, SHIFT_MASK)]);
+        assert_eq!(wire(keys.key(XK_SHIFT_L, false)), [(SHIFT, false, 0)]);
+        assert_eq!(wire(keys.release_all()), []);
+    }
+
+    #[test]
+    fn a_shift_pressed_for_a_key_goes_with_the_key() {
+        let mut keys = Keys::new(&keymap());
+        assert_eq!(wire(keys.key(XK_UPPER_A, true)), [(SHIFT, true, SHIFT_MASK), (A, true, SHIFT_MASK)]);
+        assert_eq!(wire(keys.key(XK_UPPER_A, false)), [(A, false, SHIFT_MASK), (SHIFT, false, 0)]);
+        assert_eq!(wire(keys.key(XK_TAB, true)), [(TAB, true, 0)]);
+    }
+
+    #[test]
+    fn a_shift_the_client_took_over_and_let_go_of_goes_up_once() {
+        let mut keys = Keys::new(&keymap());
+        keys.key(XK_UPPER_A, true);
+        keys.key(XK_SHIFT_L, true);
+        assert_eq!(wire(keys.key(XK_SHIFT_L, false)), [(SHIFT, false, 0)]);
+        assert_eq!(wire(keys.key(XK_UPPER_A, false)), [(A, false, 0)]);
     }
 
     fn depressed(modifiers: &Modifiers) -> u32 {
