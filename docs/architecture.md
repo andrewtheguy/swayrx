@@ -777,7 +777,11 @@ reconfigured.
 Key events carry X11 keysyms. The server compiles the configured XKB keymap,
 uploads it to the virtual keyboard, and searches the same keymap for a keycode
 producing each keysym, preferring the lowest shift level. Modifier state is
-tracked with `xkb_state` and sent after every key. A character keysym names a
+tracked with `xkb_state` and sent after every key. The state is fed a keycode's
+transitions only: xkb counts a modifier key's presses and holds the modifier
+until as many releases arrive, so a repeat of a held modifier — the browser
+auto-repeats Control like any key on some platforms — is forwarded as a key
+and kept out of the state. A character keysym names a
 character the client has already cased — remotex never forwards Caps Lock and
 sends `A` or `a` as the browser resolved it — so before each press the server
 checks what the keycode would produce under the current modifiers, and presses

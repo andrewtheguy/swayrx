@@ -70,10 +70,37 @@ fn is_character(keysym: u32) -> bool {
     xkb::Keysym::new(keysym).key_char().is_some_and(|c| !c.is_control())
 }
 
+/// The modifier state the compositor is told after every key: an `xkb_state`
+/// fed each keycode's transitions and nothing else.
+///
+/// xkb counts the presses of a modifier key and holds the modifier until as many
+/// releases have arrived, so a press of a key already down -- a held Control
+/// auto-repeating in the browser -- would leave the modifier depressed after the
+/// one release that follows, and every later key would be typed under it. Only
+/// a keycode going down or coming up reaches the state.
+struct Modifiers {
+    state: xkb::State,
+    /// The keycodes the compositor has been told are down.
+    down: HashSet<u32>,
+}
+
+impl Modifiers {
+    fn new(keymap: &xkb::Keymap) -> Self {
+        Self { state: xkb::State::new(keymap), down: HashSet::new() }
+    }
+
+    fn key(&mut self, code: u32, down: bool) {
+        let changed = if down { self.down.insert(code) } else { self.down.remove(&code) };
+        if changed {
+            self.state.update_key(xkb::Keycode::new(code), if down { xkb::KeyDirection::Down } else { xkb::KeyDirection::Up });
+        }
+    }
+}
+
 pub struct Input {
     keyboard: ZwpVirtualKeyboardV1,
     pointer: ZwlrVirtualPointerV1,
-    state: xkb::State,
+    modifiers: Modifiers,
     /// Keysym → the keycode (and level) that produces it, preferring level 0.
     keycodes: HashMap<u32, (u32, u32)>,
     /// The keycodes of the Shift keys, for pressing one and recognising any.
@@ -143,7 +170,7 @@ impl Input {
         Ok(Self {
             keyboard,
             pointer,
-            state: xkb::State::new(&keymap),
+            modifiers: Modifiers::new(&keymap),
             keycodes,
             shift_codes,
             held: HashSet::new(),
@@ -164,7 +191,8 @@ impl Input {
         };
         if down {
             if !self.held.insert(code) {
-                // A repeat: the state is as the first press left it.
+                // A repeat: the state is as the first press left it, and
+                // stays so -- see [`Modifiers`].
                 self.send_key(code, true);
                 return;
             }
@@ -193,11 +221,11 @@ impl Input {
         if !is_character(keysym) {
             return;
         }
-        let produced = self.state.key_get_one_sym(xkb::Keycode::new(code)).raw();
+        let produced = self.modifiers.state.key_get_one_sym(xkb::Keycode::new(code)).raw();
         if produced == keysym {
             return;
         }
-        let shift_down = self.state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_DEPRESSED);
+        let shift_down = self.modifiers.state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_DEPRESSED);
         if level == 1 && !shift_down {
             if let Some(&shift) = self.shift_codes.first() {
                 debug!("keysym {keysym:#x} needs Shift on keycode {code}; pressing it");
@@ -237,12 +265,13 @@ impl Input {
     fn send_key(&mut self, code: u32, down: bool) {
         let time = self.time();
         self.keyboard.key(time, code - EVDEV_OFFSET, u32::from(down));
-        self.state.update_key(xkb::Keycode::new(code), if down { xkb::KeyDirection::Down } else { xkb::KeyDirection::Up });
+        self.modifiers.key(code, down);
+        let state = &self.modifiers.state;
         self.keyboard.modifiers(
-            self.state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
-            self.state.serialize_mods(xkb::STATE_MODS_LATCHED),
-            self.state.serialize_mods(xkb::STATE_MODS_LOCKED),
-            self.state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
+            state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
+            state.serialize_mods(xkb::STATE_MODS_LATCHED),
+            state.serialize_mods(xkb::STATE_MODS_LOCKED),
+            state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
         );
     }
 
@@ -317,7 +346,50 @@ wayland_client::delegate_noop!(Compositor: ignore ZwlrVirtualPointerV1);
 
 #[cfg(test)]
 mod tests {
-    use super::is_character;
+    use xkbcommon::xkb;
+
+    use super::{EVDEV_OFFSET, Modifiers, is_character};
+
+    /// The evdev codes of Left Shift, Left Control, Left Alt and Left Meta.
+    const MODIFIER_KEYS: [u32; 4] = [42, 29, 56, 125];
+
+    fn modifiers() -> Modifiers {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_names(&context, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS).expect("the us layout compiles");
+        Modifiers::new(&keymap)
+    }
+
+    fn depressed(modifiers: &Modifiers) -> u32 {
+        modifiers.state.serialize_mods(xkb::STATE_MODS_DEPRESSED)
+    }
+
+    #[test]
+    fn a_repeated_modifier_is_let_go_by_one_release() {
+        for code in MODIFIER_KEYS.map(|evdev| evdev + EVDEV_OFFSET) {
+            let mut modifiers = modifiers();
+            modifiers.key(code, true);
+            let held = depressed(&modifiers);
+            assert_ne!(held, 0, "keycode {code} is a modifier");
+            for _ in 0..3 {
+                modifiers.key(code, true);
+                assert_eq!(depressed(&modifiers), held, "keycode {code}");
+            }
+            modifiers.key(code, false);
+            assert_eq!(depressed(&modifiers), 0, "keycode {code}");
+        }
+    }
+
+    #[test]
+    fn a_release_of_a_key_not_down_changes_nothing() {
+        for code in MODIFIER_KEYS.map(|evdev| evdev + EVDEV_OFFSET) {
+            let mut modifiers = modifiers();
+            modifiers.key(code, false);
+            assert_eq!(depressed(&modifiers), 0, "keycode {code}");
+            modifiers.key(code, true);
+            modifiers.key(code, false);
+            assert_eq!(depressed(&modifiers), 0, "keycode {code}");
+        }
+    }
 
     #[test]
     fn cased_characters_are_corrected() {
