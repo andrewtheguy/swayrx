@@ -60,7 +60,9 @@ section = "net"
 priority = "optional"
 # libpipewire, libpam and libavcodec/libavutil (the camera's H.264 decoder) are
 # linked, so $auto names them from the binary.
-# wayland-client loads libwayland-client at runtime, so dpkg-shlibdeps cannot see it.
+# wayland-client loads libwayland-client at runtime, and desktop-flac loads libFLAC,
+# the audio extension's encoder, the same way, so dpkg-shlibdeps can see neither;
+# libflac14 is trixie's libFLAC.
 # wlroots is the compositor's, not linked here: 0.19 is the first whose headless
 # backend keeps the cursor out of a screencopy without overlay_cursor.
 # libpipewire is only the client library: the speaker, the camera and the
@@ -68,7 +70,7 @@ priority = "optional"
 # `pipewire` is that server alone, with no session manager to make the speaker
 # the default or link anything to it, and no PulseAudio server for most
 # applications to play through, so wireplumber and pipewire-pulse come with it.
-depends = "$auto, libwayland-client0 (>= 1.20), libwlroots-0.19 (>= 0.19.0), pipewire, wireplumber, pipewire-pulse"
+depends = "$auto, libwayland-client0 (>= 1.20), libflac14, libwlroots-0.19 (>= 0.19.0), pipewire, wireplumber, pipewire-pulse"
 # The PAM stack an RSA-AES login is checked against; a conffile, so an operator's
 # edits survive an upgrade.
 conf-files = ["/etc/pam.d/wlshare"]

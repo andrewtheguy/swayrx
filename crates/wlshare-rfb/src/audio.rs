@@ -39,11 +39,7 @@
 //! flip is its own inverse it gets the original values bit for bit. Samples are
 //! little-endian on both sides of the codec.
 
-use flacenc::bitsink::ByteSink;
-use flacenc::component::{BitRepr, StreamInfo};
-use flacenc::config;
-use flacenc::error::{Verified, Verify};
-use flacenc::source::{Fill, FrameBuf};
+use desktop_flac::{Encoder, Stream};
 use thiserror::Error;
 
 /// The message type the client's messages and the server's begin and end use,
@@ -82,18 +78,18 @@ pub const CLIENT_AUDIO_FORMAT_LEN: usize = 10;
 
 /// The lowest sampling frequency a client may ask for.
 ///
-/// A FLAC frame here is twenty milliseconds, and the encoder takes no block
-/// shorter than 32 frames, which puts the floor at 1600 Hz; 8 kHz is the lowest
-/// rate real audio uses, so nothing a client could legitimately want is
-/// refused.
+/// A FLAC frame here is twenty milliseconds, and FLAC has no block shorter
+/// than 16 frames, which puts the floor at 800 Hz; 8 kHz is the lowest rate
+/// real audio uses, so nothing a client could legitimately want is refused.
 pub const MIN_FREQUENCY: u32 = 8_000;
 
 /// The highest sampling frequency a client may ask for.
 ///
 /// The field is a `u32`, and a server that took it at its word would overflow
-/// the buffer size in frames it asks PipeWire for; the ceiling is flacenc's,
-/// which takes no stream over 96 kHz. That is twice what the desktop's own
-/// graph runs at, and more than any client of this server asks for.
+/// the buffer size in frames it asks PipeWire for. FLAC's own ceiling is the
+/// twenty bits its stream header has for the rate; this one is twice what the
+/// desktop's own graph runs at, and more than any client of this server asks
+/// for.
 pub const MAX_FREQUENCY: u32 = 96_000;
 
 /// A sample's encoding, as QEMU's set-format numbers them. Its 32-bit codes,
@@ -256,15 +252,10 @@ pub enum AudioEncodeError {
     /// The format is not one the extension carries.
     #[error(transparent)]
     Unsupported(#[from] AudioParseError),
-    /// flacenc refused the format, carried as its message.
-    #[error("FLAC cannot carry this format: {0}")]
-    Format(String),
-    /// flacenc's own error is neither `Send` nor `Sync`, so it is carried as
-    /// its message.
-    #[error("encoding a FLAC frame: {0}")]
-    Encode(String),
-    #[error("writing a FLAC frame: {0}")]
-    Write(String),
+    /// libFLAC is not on this system, or it refused the stream or a block of
+    /// it.
+    #[error(transparent)]
+    Flac(#[from] desktop_flac::Error),
 }
 
 /// One stream's encoder: the capture's buffers in, [`MSG_AUDIO_FRAME`] messages
@@ -277,6 +268,9 @@ pub enum AudioEncodeError {
 /// next buffer. What is left when the stream stops is under twenty
 /// milliseconds, and goes with it.
 ///
+/// A frame is made the moment its last sample arrives, by `desktop-flac`'s
+/// encoder, as a FLAC stream of its own, so every frame is numbered zero.
+///
 /// | Offset | Type | Field |
 /// |---|---|---|
 /// | 0 | U8 | 0xE4 |
@@ -285,28 +279,25 @@ pub enum AudioEncodeError {
 /// | 8 | U8[] | one FLAC frame |
 pub struct FlacEncoder {
     format: AudioFormat,
-    config: Verified<config::Encoder>,
-    info: StreamInfo,
-    framebuf: FrameBuf,
+    codec: Encoder,
     /// Samples not yet a whole frame's worth, as the capture gave them.
     pending: Vec<u8>,
-    /// One block with its unsigned samples flipped, reused.
-    flipped: Vec<u8>,
-    /// The next frame's number, which its header carries; FLAC's field is 31
-    /// bits, and it wraps after a year and a half of sound.
-    frame_number: usize,
+    /// One block as libFLAC takes it, a signed integer to a sample, reused.
+    samples: Vec<i32>,
 }
 
 impl FlacEncoder {
+    /// An encoder for `format`, if it is one the extension carries and libFLAC
+    /// is on this system to encode it.
     pub fn new(format: AudioFormat) -> Result<Self, AudioEncodeError> {
         format.check()?;
-        let block = format.block_frames();
-        let bad = |e: flacenc::error::VerifyError| AudioEncodeError::Format(e.to_string());
-        let mut info = StreamInfo::new(format.frequency as usize, usize::from(format.channels), 8 * format.sample.bytes()).map_err(bad)?;
-        info.set_block_sizes(block, block).map_err(bad)?;
-        let config = config::Encoder::default().into_verified().map_err(|(_, e)| bad(e))?;
-        let framebuf = FrameBuf::with_size(usize::from(format.channels), block).map_err(bad)?;
-        Ok(Self { format, config, info, framebuf, pending: Vec::new(), flipped: Vec::new(), frame_number: 0 })
+        let codec = Encoder::new(Stream {
+            rate: format.frequency,
+            channels: format.channels,
+            bits: 8 * format.sample.bytes() as u8,
+            block: format.block_frames() as u16,
+        })?;
+        Ok(Self { format, codec, pending: Vec::new(), samples: Vec::new() })
     }
 
     /// Take `samples`, interleaved little-endian in the client's format and a
@@ -329,29 +320,20 @@ impl FlacEncoder {
     }
 
     fn encode(&mut self, block: &[u8]) -> Result<Vec<u8>, AudioEncodeError> {
-        let width = self.format.sample.bytes();
-        let block = if self.format.sample.unsigned() {
-            self.flipped.clear();
-            self.flipped.extend_from_slice(block);
-            // Little-endian, so the top bit is in each sample's last byte.
-            for sample in self.flipped.chunks_exact_mut(width) {
-                sample[width - 1] ^= 0x80;
-            }
-            &self.flipped
-        } else {
-            block
-        };
-        self.framebuf.fill_le_bytes(block, width).map_err(|e| AudioEncodeError::Format(e.to_string()))?;
-        let frame = flacenc::encode_fixed_size_frame(&self.config, &self.framebuf, self.frame_number, &self.info)
-            .map_err(|e| AudioEncodeError::Encode(e.to_string()))?;
-        self.frame_number = (self.frame_number + 1) & 0x7FFF_FFFF;
-        let mut sink = ByteSink::new();
-        frame.write(&mut sink).map_err(|e| AudioEncodeError::Write(e.to_string()))?;
-        let frame = sink.as_slice();
-        let mut msg = Vec::with_capacity(AUDIO_FRAME_HEADER_LEN + frame.len());
-        msg.extend_from_slice(&[MSG_AUDIO_FRAME, 0, 0, 0]);
-        msg.extend_from_slice(&(frame.len() as u32).to_be_bytes());
-        msg.extend_from_slice(frame);
+        // The top bit of an unsigned sample, flipped on the way in; it is in the
+        // sample's last byte, the samples being little-endian.
+        let flip = if self.format.sample.unsigned() { 0x80 } else { 0 };
+        self.samples.clear();
+        match self.format.sample.bytes() {
+            1 => self.samples.extend(block.iter().map(|&sample| i32::from((sample ^ flip) as i8))),
+            _ => self.samples.extend(block.as_chunks::<2>().0.iter().map(|&[low, high]| i32::from(i16::from_le_bytes([low, high ^ flip])))),
+        }
+        // The length is known once the frame is behind it.
+        let mut msg = Vec::with_capacity(AUDIO_FRAME_HEADER_LEN + block.len());
+        msg.extend_from_slice(&[MSG_AUDIO_FRAME, 0, 0, 0, 0, 0, 0, 0]);
+        self.codec.encode(&self.samples, &mut msg)?;
+        let length = (msg.len() - AUDIO_FRAME_HEADER_LEN) as u32;
+        msg[4..AUDIO_FRAME_HEADER_LEN].copy_from_slice(&length.to_be_bytes());
         Ok(msg)
     }
 }
@@ -383,7 +365,7 @@ enum AudioDecodeError {
     /// The format is not one the extension carries.
     #[error(transparent)]
     Unsupported(#[from] AudioParseError),
-    /// symphonia's own error is carried as its message, as flacenc's is.
+    /// symphonia's own error is carried as its message.
     #[error("FLAC cannot carry this format: {0}")]
     Format(String),
     #[error("decoding a FLAC frame: {0}")]
@@ -525,7 +507,7 @@ mod tests {
     }
 
     /// Decode a run of frame messages with [`FlacDecoder`] — symphonia's
-    /// decoder, which shares nothing with flacenc — checking each message's
+    /// decoder, which shares nothing with libFLAC — checking each message's
     /// framing on the way.
     fn decode(format: AudioFormat, messages: &[Vec<u8>]) -> Vec<u8> {
         let mut decoder = FlacDecoder::new(format).unwrap();
@@ -619,12 +601,13 @@ mod tests {
 
     /// Every format, channel count and a spread of rates decodes to exactly
     /// the samples that went in, fed in buffers that do not line up with the
-    /// frames.
+    /// frames. 70001 Hz is a rate no frame header can state, so its frames
+    /// leave it to the header the client builds.
     #[test]
     fn every_format_round_trips_bit_for_bit() {
         for sample in [SampleFormat::U8, SampleFormat::S8, SampleFormat::U16, SampleFormat::S16] {
             for channels in [1, 2] {
-                for frequency in [MIN_FREQUENCY, 11_025, 44_100, 48_000, MAX_FREQUENCY] {
+                for frequency in [MIN_FREQUENCY, 11_025, 44_100, 48_000, 70_001, MAX_FREQUENCY] {
                     let format = AudioFormat { sample, channels, frequency };
                     let blocks = 5;
                     let pcm = signal(format, blocks * format.block_frames());

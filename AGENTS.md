@@ -17,6 +17,11 @@
   capture and the camera — the last for bindgen, which PipeWire's and FFmpeg's
   `-sys` crates run — and `libavcodec-dev` for the camera's H.264 decoder, the
   system's libavcodec linked dynamically.
+  The audio extension's FLAC coding is not here either: it is the
+  `desktop-flac` repository, shared with the remotex gateway and pinned by
+  release tag the same way. It loads the system's libFLAC at run time and never
+  links it: nothing is needed to build, and `libflac14` to run the protocol
+  crate's audio tests or the daemon's audio.
 - Every protocol byte comes from `wlshare-rfb`; the daemon writes none itself.
   Every encoder gets an independent decoder in its tests.
 - Build and run the daemon on a Linux host inside the wlroots-based Wayland

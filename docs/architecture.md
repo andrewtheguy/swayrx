@@ -24,9 +24,10 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
   and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding's
   framing over `desktop-vp9`, the cursor and clipboard encodings, and the
   density, outputs, audio, camera and microphone extensions. It has no platform
-  dependency and its tests decode every encoder's output with an independent
-  decoder, read every server message back with a client's parser, and run the
-  RSA-AES exchange against a client written from the specification.
+  dependency — the audio extension's encoder, libFLAC under `desktop-flac`, is
+  loaded at run time and not linked — and its tests decode every encoder's output with an
+  independent decoder, read every server message back with a client's parser,
+  and run the RSA-AES exchange against a client written from the specification.
 - `crates/wlshare` is the daemon. `compositor.rs` is the Wayland thread and its
   command handler; `capture.rs`, `cursor.rs`, `outputs.rs`, `input.rs` and
   `clipboard.rs` are the protocols it speaks; `audio.rs`, `camera.rs` and
@@ -477,9 +478,9 @@ lists only `-259`, gtk-vnc for one, hears nothing.
   format, channel count and frequency are the client's to choose, and the
   server converts what the desktop plays into them. The formats are QEMU's
   codes 0–3, U8, S8, U16 and S16; its 32-bit codes are refused, because FLAC
-  stores at most 24 bits. The frequency is bounded at 8 kHz, below which a
-  frame is shorter than the encoder takes, and at 96 kHz, flacenc's own
-  ceiling. A code or rate outside those is fatal.
+  stores at most 24 bits. The frequency is bounded at 8 kHz, the lowest rate
+  real audio uses, and at 96 kHz, twice what the desktop's own graph runs at.
+  A code or rate outside those is fatal.
 - **Begin and end**, server → client, QEMU's messages.
 - **A FLAC frame**, server → client, between a begin and an end:
 
@@ -491,10 +492,12 @@ lists only `-259`, gtk-vnc for one, hears nothing.
 | 8 | U8[] | one FLAC frame |
 
 Every frame holds exactly `frequency / 50` frames of samples, rounded down —
-twenty milliseconds, 960 at 48 kHz — in fixed-blocking mode, numbered from zero
-at each begin. The FLAC stream header, `STREAMINFO`, is never sent: everything
+twenty milliseconds, 960 at 48 kHz — in fixed-blocking mode, and is numbered
+zero. The FLAC stream header, `STREAMINFO`, is never sent: everything
 in it is already agreed, so a client builds it from the format it set, with
-that block size as both minimum and maximum. An unsigned format has the top
+that block size as both minimum and maximum. A frame states its own rate unless
+no frame header has a code for it, as for 70001 Hz, and then leaves it to that
+header. An unsigned format has the top
 bit of every sample flipped before it is encoded, which maps its range onto the
 signed one of the same width with silence on zero; the client flips it back.
 Decoded samples are interleaved and little-endian, and bit for bit what the
@@ -502,10 +505,26 @@ capture produced.
 
 FLAC is lossless, so the gateway's Opus encode stays the only lossy step, while
 music and speech cost about two-thirds of their 1.5 Mbit/s PCM rate or less and
-a silent desktop a few bytes a frame. `wlshare-rfb` encodes with `flacenc`, and
-its tests read every frame back with symphonia's decoder, which shares nothing
-with it. A frame length past 64 KiB is fatal to a client: the largest block
-there is, 20 ms of 16-bit stereo at 96 kHz, is 7680 bytes before compression.
+a silent desktop a few bytes a frame. A frame length past 64 KiB is fatal to a
+client: the largest block there is, 20 ms of 16-bit stereo at 96 kHz, is 7680
+bytes before compression.
+
+The encoder is libFLAC, the reference one, spoken to in one place:
+[desktop-flac](https://github.com/andrewtheguy/desktop-flac), a repository of
+its own that this workspace and the remotex gateway, whose decoder it also is,
+each pin by release tag. It loads the system's shared library the first time a
+stream is set up — FLAC 1.5's `libFLAC.so.14`, or 1.4's `libFLAC.so.12` on a
+system that has that one — so nothing of FLAC is compiled or linked. A load at
+run time is one `dpkg-shlibdeps` cannot see, so the package
+names `libflac14`, trixie's, in its dependencies itself. Without the library an
+enable is refused, with a log line saying what to install, and no begin is
+sent. libFLAC encodes a stream and holds each block back until it has a sample
+of the next, to know whether the block is the stream's last; sound heard as it
+is made cannot wait twenty milliseconds for that, so each frame is a stream of
+its own, one block long, started and finished around it, which is why every
+frame is numbered zero. The marker and metadata such a stream opens with are
+dropped. `wlshare-rfb`'s tests read every frame back with symphonia's decoder,
+which shares nothing with libFLAC.
 
 While any client listens the host is silent, the way a remote desktop's sound
 is: the desktop plays into the **speaker**, a sink of wlshare's own, rather than
