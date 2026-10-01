@@ -62,7 +62,7 @@ vp9_quality = 90
 handshake_timeout_secs = 120
 
 # Whether a client may hear the desktop; off by default. While a client that asks for wlshare's
-# audio extension (the remotex gateway, for a target with audio = true) has it
+# audio extension (the remotex gateway, in a session started with sound) has it
 # enabled, wlshare adds a PipeWire sink of its own, "wlshare remote audio", and
 # makes it the default: every stream that follows the default plays there and is
 # silent on the host, and one an application pinned to a sink of the host's is

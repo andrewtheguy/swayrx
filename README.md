@@ -30,9 +30,11 @@ pseudo-encoding and can draw Raw rectangles can connect. ZRLE is used when
 listed unless the client also asks for wlshare's private VP9 stream. A configured
 login additionally requires RSA-AES. Cursor support is required because wlshare
 never puts the pointer in framebuffer pixels. The density and outputs extensions
-are asked for by the client and stay silent otherwise; remotex asks for both on
-every plain `vnc` target. Audio is a private extension that remotex asks for when a target has
-`audio = true`: while it listens wlshare's own sink is the default, so every
+are asked for by the client and stay silent otherwise; remotex asks for both,
+and for the VP9 stream, on a `vnc` target with `subtype = "wlshare"`, and reads
+wlshare as any VNC server on a target without it. Audio is a private extension
+that remotex asks for in a session on such a target started with sound: while it
+listens wlshare's own sink is the default, so every
 stream that follows the default plays there rather than on the host's speakers,
 and that sink's monitor is sent encoded as lossless FLAC. An application pinned
 to a sink of the host's stays there and is heard on the host. A client
