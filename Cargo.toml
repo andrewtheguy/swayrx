@@ -1,10 +1,12 @@
 # The daemon and the protocol crate it is built on (see docs/architecture.md).
-# The VP9 coding under both is desktop-vp9, its own repository.
+# The VP9 coding under both is desktop-vp9 and the FLAC coding desktop-flac, each
+# its own repository.
 #
 # `default-members` deliberately omits the daemon: it needs libwayland and
 # libxkbcommon and only runs against a Wayland compositor, so a bare
 # `cargo test` on a development machine of any OS exercises the protocol crate
-# and nothing else. Build the daemon explicitly with `-p wlshare`.
+# and nothing else, its audio tests with the libFLAC that machine has installed.
+# Build the daemon explicitly with `-p wlshare`.
 [workspace]
 members = ["crates/wlshare-rfb", "crates/wlshare"]
 default-members = ["crates/wlshare-rfb"]

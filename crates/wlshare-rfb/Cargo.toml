@@ -27,16 +27,18 @@ aes = "0.9"
 eax = "0.6"
 sha1 = "0.11"
 sha2 = "0.11"
-# The audio extension's FLAC frames. Pure Rust; without its default features,
-# so no worker threads, serde or logging come with it.
-flacenc = { version = "0.5", default-features = false }
+# The audio extension's FLAC frames: the one place libFLAC is spoken to, for
+# this workspace and for the remotex gateway, each pinned to its release tag. It
+# loads the system's shared library at run time, so nothing of FLAC is compiled
+# or linked.
+desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.1" }
 # The VP9 encoding's codec: the one place libvpx is spoken to, for this
 # workspace and for the remotex gateway, each pinned to its release tag.
 desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
 
 [dev-dependencies]
 # The FLAC encoder's tests read every frame back with symphonia's decoder,
-# which shares nothing with flacenc: pure Rust, and only the FLAC bundle of it
+# which shares nothing with libFLAC: pure Rust, and only the FLAC bundle of it
 # — `symphonia-core` for the decoder trait and the packet it takes.
 symphonia-bundle-flac = "0.6"
 symphonia-core = "0.6"

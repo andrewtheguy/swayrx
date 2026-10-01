@@ -8,8 +8,10 @@
 //!
 //! The crate is platform-independent so that all of it is unit-tested on any
 //! machine, the daemon being buildable only where libwayland and libxkbcommon
-//! are. Tests here use an independent decoder for every encoder, so the two
-//! halves cannot share a misunderstanding.
+//! are. The audio extension's FLAC encoder is the system's libFLAC, which
+//! `desktop-flac` loads at run time rather than links, so the crate builds
+//! without it and only the audio tests need it installed. Tests here use an independent decoder for
+//! every encoder, so the two halves cannot share a misunderstanding.
 //!
 //! ## What is on the wire, and what is not
 //!
