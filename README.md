@@ -36,7 +36,8 @@ wlshare as any VNC server on a target without it. Audio is a private extension
 that remotex asks for in a session on such a target started with sound: while it
 listens wlshare's own sink is the default, so every
 stream that follows the default plays there rather than on the host's speakers,
-and that sink's monitor is sent encoded as lossless FLAC. An application pinned
+and that sink's monitor is sent encoded as lossless FLAC, or as Opus at the
+rate the client names where it asks for that instead. An application pinned
 to a sink of the host's stays there and is heard on the host. A client
 that does not list it hears nothing.
 Audio, the camera and the microphone are each off until the configuration sets
@@ -114,13 +115,15 @@ the server resolves the client's keysyms through the same keymap it uploads.
 ## Building
 
 The workspace has two crates: `wlshare-rfb`, the protocol, which builds
-anywhere and tests wherever libFLAC is installed — the audio extension's
-encoder, loaded at run time and never linked, Debian's `libflac14` — and
+anywhere and tests wherever libFLAC and `ffmpeg` are installed — the audio
+extension's FLAC encoder, loaded at run time and never linked, Debian's
+`libflac14`, and the decoder its Opus tests read their packets back with — and
 `wlshare`, the daemon, which needs libwayland,
 libxkbcommon, libpipewire and libavcodec and only runs under a wlroots-based
 Wayland compositor. The VP9 coding under them is
-[desktop-vp9](https://github.com/andrewtheguy/desktop-vp9) and the FLAC coding
-[desktop-flac](https://github.com/andrewtheguy/desktop-flac), each shared with
+[desktop-vp9](https://github.com/andrewtheguy/desktop-vp9), the FLAC coding
+[desktop-flac](https://github.com/andrewtheguy/desktop-flac) and the Opus coding
+[desktop-opus](https://github.com/andrewtheguy/desktop-opus), each shared with
 the remotex gateway and pinned by its release tag. A bare `cargo test` covers the
 first; build the daemon with
 `cargo build --release -p wlshare` on a Linux host with `libwayland-dev`,
@@ -137,7 +140,7 @@ before running the workflow. The package version is the crate's, and the
 distribution is in the file name only. The package depends on
 `libwlroots-0.19 (>= 0.19.0)`, the first wlroots that keeps the cursor out of a
 headless capture, on `libflac14`, the FLAC encoder the daemon loads when a
-client enables audio, and on `pipewire`, `wireplumber` and `pipewire-pulse`: the
+client enables audio as FLAC — the Opus encoder is linked in — and on `pipewire`, `wireplumber` and `pipewire-pulse`: the
 PipeWire server the speaker, the camera and the microphone live in, the session
 manager that makes the speaker the default and links streams to it, and the
 PulseAudio server most applications play through. Without them the desktop's

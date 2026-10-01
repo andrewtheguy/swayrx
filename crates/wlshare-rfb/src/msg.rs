@@ -107,6 +107,9 @@ pub enum ClientMsg {
     AudioDisable,
     /// The QEMU Audio extension: the sample format the client wants.
     AudioFormat(AudioFormat),
+    /// The audio extension's own: the rate, in bits per second, the sound is
+    /// coded at as Opus.
+    AudioBitrate(u32),
     /// The camera extension: a camera producing H.264 in this format
     /// ([`crate::camera`]).
     CameraPlug(CameraFormat),
@@ -262,6 +265,7 @@ pub fn parse(buf: &[u8]) -> Result<Option<(ClientMsg, usize)>, ParseError> {
             Some((ClientAudio::Enable, n)) => (ClientMsg::AudioEnable, n),
             Some((ClientAudio::Disable, n)) => (ClientMsg::AudioDisable, n),
             Some((ClientAudio::SetFormat(format), n)) => (ClientMsg::AudioFormat(format), n),
+            Some((ClientAudio::SetBitrate(bitrate), n)) => (ClientMsg::AudioBitrate(bitrate), n),
         },
         MSG_CAMERA => match crate::camera::parse_client(buf)? {
             None => return Ok(None),
@@ -455,6 +459,10 @@ mod tests {
         let (m, n) = parse(&[255, 1, 0, 2, 3, 2, 0, 0, 0xBB, 0x80]).unwrap().unwrap();
         assert_eq!(m, ClientMsg::AudioFormat(AudioFormat { sample: SampleFormat::S16, channels: 2, frequency: 48_000 }));
         assert_eq!(n, 10);
+        assert_eq!(parse(&[255, 1, 0, 3, 0, 0, 0xFA]), Ok(None));
+        let (m, n) = parse(&[255, 1, 0, 3, 0, 0, 0xFA, 0x00]).unwrap().unwrap();
+        assert_eq!((m, n), (ClientMsg::AudioBitrate(64_000), 8));
+        assert_eq!(parse(&[255, 1, 0, 3, 0, 0, 0, 1]), Err(ParseError::Audio(AudioParseError::BadBitrate(1))));
         assert_eq!(parse(&[255, 7, 0, 0]), Err(ParseError::Audio(AudioParseError::UnknownSubmessage(7))));
     }
 

@@ -7,9 +7,10 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # The daemon links libwayland-client, libxkbcommon, libpam, libpipewire and
 # libavcodec (the camera's H.264 decoder); cargo-deb reads the resulting .so
-# dependencies into the package's Depends. libFLAC, the audio encoder, is loaded
-# at run time and not linked, so nothing of it is installed here and the
-# package's Depends names it by hand. libclang-dev is a build-time need
+# dependencies into the package's Depends. libFLAC, the audio extension's FLAC
+# encoder, is loaded at run time and not linked, so nothing of it is installed
+# here and the package's Depends names it by hand; libopus, its Opus encoder,
+# is a static archive the build downloads. libclang-dev is a build-time need
 # with nothing to link: pipewire-sys, libspa-sys and ffmpeg-sys-next generate
 # their bindings with bindgen, which loads libclang, and without it a clean
 # build fails with "Unable to find libclang".

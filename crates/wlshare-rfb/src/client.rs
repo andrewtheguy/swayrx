@@ -15,7 +15,8 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use crate::audio::{
-    AUDIO_FRAME_HEADER_LEN, AudioFormat, AudioParseError, CLIENT_AUDIO_DISABLE, CLIENT_AUDIO_ENABLE, CLIENT_AUDIO_FORMAT_LEN, CLIENT_AUDIO_SET_FORMAT,
+    AUDIO_FRAME_HEADER_LEN, AudioFormat, AudioParseError, CLIENT_AUDIO_BITRATE_LEN, CLIENT_AUDIO_DISABLE, CLIENT_AUDIO_ENABLE, CLIENT_AUDIO_FORMAT_LEN,
+    CLIENT_AUDIO_SET_BITRATE, CLIENT_AUDIO_SET_FORMAT,
     CLIENT_AUDIO_SWITCH_LEN, MAX_AUDIO_FRAME, MSG_AUDIO_FRAME, MSG_QEMU, SERVER_AUDIO_BEGIN, SERVER_AUDIO_END, SUBMESSAGE_AUDIO,
 };
 use crate::density::{CLIENT_DENSITY_LEN, MSG_DENSITY, to_fixed};
@@ -228,8 +229,8 @@ pub fn audio_disable() -> [u8; CLIENT_AUDIO_SWITCH_LEN] {
     audio_op(CLIENT_AUDIO_DISABLE)
 }
 
-/// The audio extension: the format every FLAC frame is to decode to, if it is
-/// one the extension carries — the server takes any other as the end of the
+/// The audio extension: the format every FLAC frame is to decode to, and the
+/// one Opus is coded from, if it is one the extension carries — the server takes any other as the end of the
 /// connection.
 pub fn audio_set_format(format: &AudioFormat) -> Result<[u8; CLIENT_AUDIO_FORMAT_LEN], AudioParseError> {
     format.check()?;
@@ -238,6 +239,17 @@ pub fn audio_set_format(format: &AudioFormat) -> Result<[u8; CLIENT_AUDIO_FORMAT
     msg[4] = format.sample as u8;
     msg[5] = format.channels;
     msg[6..].copy_from_slice(&format.frequency.to_be_bytes());
+    Ok(msg)
+}
+
+/// The audio extension: the rate, in bits per second, the sound is coded at as
+/// Opus, if it is one Opus is coded at — the server takes any other as the end
+/// of the connection.
+pub fn audio_set_bitrate(bitrate: u32) -> Result<[u8; CLIENT_AUDIO_BITRATE_LEN], AudioParseError> {
+    crate::audio::check_bitrate(bitrate)?;
+    let mut msg = [0u8; CLIENT_AUDIO_BITRATE_LEN];
+    msg[..4].copy_from_slice(&audio_op(CLIENT_AUDIO_SET_BITRATE));
+    msg[4..].copy_from_slice(&bitrate.to_be_bytes());
     Ok(msg)
 }
 
@@ -292,11 +304,12 @@ pub enum ServerMsg {
     /// The density extension's `OutputScale`: the framebuffer's size and the
     /// scale it is drawn at, as 16.16 fixed point.
     OutputScale { width: u16, height: u16, fixed: u32 },
-    /// The audio extension: a stream is starting, and FLAC frames follow.
+    /// The audio extension: a stream is starting, and its frames follow.
     AudioBegin,
     /// The audio extension: the stream stopped.
     AudioEnd,
-    /// The audio extension: one FLAC frame, without its message header.
+    /// The audio extension: one FLAC frame or one Opus packet, without its
+    /// message header.
     AudioFrame(Vec<u8>),
 }
 
@@ -321,7 +334,7 @@ pub enum ParseError {
     UnknownQemuSubmessage(u8),
     #[error("audio operation {0} is not begin or end")]
     UnknownAudioOperation(u16),
-    #[error("a FLAC frame of {0} bytes is over the {MAX_AUDIO_FRAME}-byte ceiling")]
+    #[error("an audio frame of {0} bytes is over the {MAX_AUDIO_FRAME}-byte ceiling")]
     AudioFrameTooLong(usize),
 }
 
@@ -545,6 +558,9 @@ mod tests {
         }
         let format = AudioFormat { sample: SampleFormat::S16, channels: 2, frequency: 48_000 };
         assert_eq!(parsed(&audio_set_format(&format).unwrap()), ClientMsg::AudioFormat(format));
+        assert_eq!(parsed(&audio_set_bitrate(64_000).unwrap()), ClientMsg::AudioBitrate(64_000));
+        assert_eq!(audio_set_bitrate(64_000).unwrap(), [255, 1, 0, 3, 0, 0, 0xFA, 0]);
+        assert_eq!(audio_set_bitrate(5_999), Err(AudioParseError::BadBitrate(5_999)));
     }
 
     #[test]

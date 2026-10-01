@@ -51,8 +51,7 @@ max_fps = 60
 # once, as one frame, when a desktop left coarse has been quiet half a second.
 # Where quality gives way to frames is built into the encoder, as in every
 # adaptive stream, so there is no floor to set. Higher is sharper
-# and larger. 90, because wlshare is mostly used on a LAN, which has the room;
-# the sound is lossless already, and the picture need not be the weak link.
+# and larger. 90, because wlshare is mostly used on a LAN, which has the room.
 vp9_quality = 90
 
 # Seconds a connection has to finish the handshake — the security exchange and
@@ -67,7 +66,7 @@ handshake_timeout_secs = 120
 # makes it the default: every stream that follows the default plays there and is
 # silent on the host, and one an application pinned to a sink of the host's is
 # still heard on it. What that sink plays is sent in the sample format the client
-# chose, encoded as FLAC. When the last client stops listening the sink goes and
+# chose, encoded as FLAC or as Opus, whichever the client asked for. When the last client stops listening the sink goes and
 # the host's own is the default again. A headless session needs no sink of its
 # own: wlshare's is one.
 audio = false

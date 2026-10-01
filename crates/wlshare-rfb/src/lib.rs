@@ -10,7 +10,9 @@
 //! machine, the daemon being buildable only where libwayland and libxkbcommon
 //! are. The audio extension's FLAC encoder is the system's libFLAC, which
 //! `desktop-flac` loads at run time rather than links, so the crate builds
-//! without it and only the audio tests need it installed. Tests here use an independent decoder for
+//! without it and only the FLAC tests need it installed; its Opus encoder is
+//! libopus from a prebuilt static archive, as libvpx is under `desktop-vp9`.
+//! Tests here use an independent decoder for
 //! every encoder, so the two halves cannot share a misunderstanding.
 //!
 //! ## What is on the wire, and what is not
@@ -43,9 +45,10 @@
 //!   client learns which outputs the compositor has and asks for the one it
 //!   wants shared ([`outputs`]).
 //! - **The audio extension**, a private pseudo-encoding and message type, which
-//!   carries the desktop's sound over the same connection as FLAC, lossless, in
-//!   the format the client chose; the client's messages and the stream's begin
-//!   and end are the QEMU Audio extension's ([`audio`]).
+//!   carries the desktop's sound over the same connection in the format the
+//!   client chose: as FLAC, lossless, or as Opus for a client that lists a
+//!   second pseudo-encoding beside the first. The client's messages and the
+//!   stream's begin and end are the QEMU Audio extension's ([`audio`]).
 //! - **The camera extension**, a third private pair, which is how a client lends
 //!   the desktop a camera: the client plugs it and sends H.264, and the server
 //!   says when the desktop's applications want frames ([`camera`]).
@@ -117,6 +120,9 @@ pub const ENCODING_CAMERA: i32 = 0x574c_5343;
 /// The microphone extension's pseudo-encoding, the ASCII bytes `WLSM`.
 pub const ENCODING_MICROPHONE: i32 = 0x574c_534d;
 /// The audio extension's pseudo-encoding, the ASCII bytes `WLSF`: a client that
-/// lists it can take the desktop's sound as FLAC, and is told so by an empty
-/// rectangle of this encoding ([`audio`]).
+/// lists it can take the desktop's sound, as FLAC unless it asks otherwise, and
+/// is told so by an empty rectangle of this encoding ([`audio`]).
 pub const ENCODING_AUDIO: i32 = 0x574c_5346;
+/// Listed beside [`ENCODING_AUDIO`], asks for the sound as Opus in place of
+/// FLAC: the ASCII bytes `WLOP` ([`audio::Codec`]).
+pub const ENCODING_AUDIO_OPUS: i32 = 0x574c_4f50;

@@ -24,8 +24,9 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
   and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding's
   framing over `desktop-vp9`, the cursor and clipboard encodings, and the
   density, outputs, audio, camera and microphone extensions. It has no platform
-  dependency — the audio extension's encoder, libFLAC under `desktop-flac`, is
-  loaded at run time and not linked — and its tests decode every encoder's output with an
+  dependency — the audio extension's FLAC encoder, libFLAC under `desktop-flac`,
+  is loaded at run time and not linked, and its Opus encoder, libopus under
+  `desktop-opus`, is a prebuilt static archive — and its tests decode every encoder's output with an
   independent decoder, read every server message back with a client's parser,
   and run the RSA-AES exchange against a client written from the specification.
 - `crates/wlshare` is the daemon. `compositor.rs` is the Wayland thread and its
@@ -463,9 +464,11 @@ which is where the gateway's half of this lives.
 
 ## The audio extension
 
-The desktop's sound, as FLAC, on the connection the pixels use. It is private —
-pseudo-encoding `0x574c5346` (`WLSF`) and server message type `0xE4` — and its
-client is the remotex gateway. The client's messages and the stream's
+The desktop's sound, as FLAC or as Opus, on the connection the pixels use. It
+is private — pseudo-encoding `0x574c5346` (`WLSF`) and server message type
+`0xE4` — and its client is the remotex gateway. Which codec is the client's to
+ask for, as the format is, and nothing here configures it: FLAC, unless the
+client lists `0x574c4f50` (`WLOP`) beside the encoding. The client's messages and the stream's
 begin and end are borrowed from the QEMU Audio extension `rfbproto` registers,
 message type `255` submessage `1`; QEMU's pseudo-encoding, `-259`, is not
 spoken, because what it promises is raw samples and none are sent. A client that
@@ -481,17 +484,36 @@ lists only `-259`, gtk-vnc for one, hears nothing.
   stores at most 24 bits. The frequency is bounded at 8 kHz, the lowest rate
   real audio uses, and at 96 kHz, twice what the desktop's own graph runs at.
   A code or rate outside those is fatal.
+- **Opus**, client → server: the pseudo-encoding `WLOP`, listed beside `WLSF`,
+  asks for the sound as Opus in place of FLAC. A pseudo-encoding rather than a
+  message, as the VP9 stream's choices are, so it rides the list that asks for
+  the sound at all. A list that changes the codec while a stream runs restarts
+  the stream in the new one, between an end and a begin.
+- **Set bitrate**, client → server, operation `3` beside QEMU's three and
+  wlshare's own: the rate Opus is coded at, in bits per second, 6 000 to
+  510 000, libopus's bounds; a rate outside them is fatal. 96 000 where none is
+  set. It may come before the stream or while it runs, and a running one moves
+  to it at its next packet with no restart. A FLAC stream has no rate to move.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U8 | `255` |
+| 1 | U8 | `1` |
+| 2 | U16 | operation, `3` |
+| 4 | U32 | bits per second |
+
 - **Begin and end**, server → client, QEMU's messages.
-- **A FLAC frame**, server → client, between a begin and an end:
+- **A frame**, server → client, between a begin and an end — one FLAC frame, or
+  one Opus packet:
 
 | Offset | Type | Field |
 |---|---|---|
 | 0 | U8 | message type, `0xE4` |
 | 1 | U8[3] | padding |
 | 4 | U32 | length of the frame |
-| 8 | U8[] | one FLAC frame |
+| 8 | U8[] | one FLAC frame or one Opus packet |
 
-Every frame holds exactly `frequency / 50` frames of samples, rounded down —
+Every FLAC frame holds exactly `frequency / 50` frames of samples, rounded down —
 twenty milliseconds, 960 at 48 kHz — in fixed-blocking mode, and is numbered
 zero. The FLAC stream header, `STREAMINFO`, is never sent: everything
 in it is already agreed, so a client builds it from the format it set, with
@@ -503,8 +525,7 @@ signed one of the same width with silence on zero; the client flips it back.
 Decoded samples are interleaved and little-endian, and bit for bit what the
 capture produced.
 
-FLAC is lossless, so the gateway's Opus encode stays the only lossy step, while
-music and speech cost about two-thirds of their 1.5 Mbit/s PCM rate or less and
+FLAC is lossless, while music and speech cost about two-thirds of their 1.5 Mbit/s PCM rate or less and
 a silent desktop a few bytes a frame. A frame length past 64 KiB is fatal to a
 client: the largest block there is, 20 ms of 16-bit stereo at 96 kHz, is 7680
 bytes before compression.
@@ -525,6 +546,32 @@ its own, one block long, started and finished around it, which is why every
 frame is numbered zero. The marker and metadata such a stream opens with are
 dropped. `wlshare-rfb`'s tests read every frame back with symphonia's decoder,
 which shares nothing with libFLAC.
+
+As Opus, every packet is twenty milliseconds too, `frequency / 50` frames, and
+the frequency must be one Opus codes at — 8, 12, 16, 24 or 48 kHz — or the
+enable is refused with a log line and no begin. The sample format says only
+what the capture hands the encoder, an unsigned sample flipped as for FLAC and
+an 8-bit one widened to sixteen: what a decoder gives back is its own business.
+No `OpusHead` is sent. A client builds it from the format it set, with a
+pre-skip of 312, the encoder's lookahead in 48 kHz samples at every frequency.
+A packet decodes from the ones before it and the wire numbers none, so a client
+could not tell one was missing: wlshare drops no packet it coded, and a client
+that fell behind loses sound that was never coded instead.
+
+It is the choice of a client whose own listener takes Opus: the remotex gateway
+hands each packet to the browser as it came, where it would otherwise decode
+the FLAC and code Opus itself, and sends the rate its own walk of the browser's
+link arrives at as a set-bitrate. The encoder is libopus, spoken to in one
+place as libFLAC is: [desktop-opus](https://github.com/andrewtheguy/desktop-opus),
+which this workspace and the gateway, for the sound it codes itself, each pin
+by release tag, so a packet made here and one made there are the same stream —
+music-tuned, constrained variable rate around the bitrate, at full effort, with
+silence a few bytes a packet. libopus is linked from a prebuilt static archive
+its sys crate downloads, as libvpx is under `desktop-vp9`: no C is compiled,
+nothing is loaded at run time and the package depends on nothing for it.
+`wlshare-rfb`'s tests wrap the packets in an Ogg stream behind the header a
+client builds and decode them with FFmpeg's own Opus decoder, which shares
+nothing with libopus, so they need `ffmpeg` on the path.
 
 While any client listens the host is silent, the way a remote desktop's sound
 is: the desktop plays into the **speaker**, a sink of wlshare's own, rather than
@@ -555,10 +602,13 @@ keeps it off the session's task, which has pixels to compress; a 20 ms buffer
 takes a fraction of a millisecond. The encoder keeps what does not fill a frame
 for the next buffer — PipeWire honours its own quantum before settling on the
 requested one, so the first buffers of a session are often shorter than 20 ms —
-and queues each frame it completes in a sixteen-deep queue, dropping the oldest
-when a client cannot keep up: each FLAC frame decodes on its own, so a dropped
-one is a 20 ms hole, and a stalled capture callback is worse. A set-format on a
-running stream restarts the capture in the new format, holding the speaker
+and queues each frame it completes in a sixteen-deep queue. When a client cannot
+keep up, FLAC drops the oldest: each frame decodes on its own, so a dropped one
+is a 20 ms hole, and a stalled capture callback is worse. Opus leaves a buffer
+uncoded while the queue is full instead, so the decoder is handed every packet
+the encoder made and the two stay in step across the hole. A set-format on a
+running stream, or a list that changes its codec, restarts the capture as now
+asked for, holding the speaker
 across so the host is not heard between the two captures, and a disable or a
 disconnect stops it; what is left of a frame goes with it.
 
