@@ -1,6 +1,6 @@
 //! The desktop's sound: a PipeWire capture of the monitor of wlshare's own
 //! sink, one per client that enabled audio, in the format that client asked for
-//! and encoded as FLAC.
+//! and encoded as FLAC or as Opus, whichever it asked for.
 //!
 //! wlshare runs inside the user's session, where the audio graph is, so it
 //! reads what the desktop plays the same way it reads what the desktop draws:
@@ -13,10 +13,10 @@
 //! PipeWire's word for "the monitor of that sink". PipeWire converts the
 //! graph's own rate and sample format into the client's, and is asked for
 //! buffers of twenty milliseconds — one FLAC frame's worth, and one Opus
-//! packet's at the gateway.
+//! packet's.
 //!
-//! Per client rather than shared, because the format is the client's choice
-//! and two clients may choose differently; a capture stream is cheap, and a
+//! Per client rather than shared, because the format and the codec are the
+//! client's choice and two clients may choose differently; a capture stream is cheap, and a
 //! desktop with two listeners is rare. The speaker is shared: every capture
 //! reads the one sink the desktop plays into. Nothing runs while no client has
 //! enabled audio: a capture's stream, its thread and its PipeWire connection
@@ -26,7 +26,7 @@
 //! PipeWire's loop wants a thread of its own, so each capture is one, and the
 //! process callback runs on that loop rather than on the graph's real-time
 //! thread — `RT_PROCESS` is deliberately not set. The callback encodes the
-//! buffer ([`FlacEncoder`]) and queues the frames it completes, which
+//! buffer ([`AudioEncoder`]) and queues the frames it completes, which
 //! allocates, takes a mutex and wakes a task, and none of that is real-time
 //! safe: run on the data thread it could stall the whole audio graph and give
 //! every application on the host an xrun. The thread this capture already owns
@@ -34,11 +34,13 @@
 //! compress; a twenty-millisecond buffer takes a fraction of a millisecond to
 //! encode. A session that falls behind loses the oldest frames, never the
 //! newest, so what it does send is live, and each FLAC frame decodes on its
-//! own, so a lost one costs the client nothing but its own samples.
+//! own, so a lost one costs the client nothing but its own samples; a lost
+//! Opus packet is concealed by the client's decoder.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -48,7 +50,7 @@ use log::{debug, info, warn};
 use pipewire as pw;
 use pw::spa;
 use tokio::sync::Notify;
-use wlshare_rfb::audio::{AudioFormat, FlacEncoder, SampleFormat};
+use wlshare_rfb::audio::{AudioEncoder, AudioFormat, Codec, SampleFormat};
 
 use crate::shared::ClientId;
 
@@ -70,8 +72,8 @@ const SPEAKER_PRIORITY: u32 = 100_000;
 /// The speaker, while any capture holds a [`Lease`] on it.
 static SPEAKER: Mutex<Option<Speaker>> = Mutex::new(None);
 
-/// One client's capture: the thread running PipeWire's loop, and the FLAC
-/// frame messages it has produced.
+/// One client's capture: the thread running PipeWire's loop, and the frame
+/// messages it has produced.
 pub struct Capture {
     quit: pw::channel::Sender<()>,
     thread: Option<JoinHandle<()>>,
@@ -85,26 +87,31 @@ struct Queue {
     buffers: Mutex<VecDeque<Vec<u8>>>,
     /// Signalled when a frame is queued; a permit is kept when nobody waits.
     ready: Notify,
-    dropped: std::sync::atomic::AtomicU64,
+    dropped: AtomicU64,
+    /// The rate Opus is to be coded at, in bits per second, which the capture
+    /// thread moves its encoder to before the next buffer.
+    bitrate: AtomicU32,
 }
 
 impl Capture {
-    /// Open a capture in `format` for `client`. Blocks until PipeWire has taken
-    /// the stream or refused it, so it belongs on a blocking thread.
-    pub fn start(client: ClientId, format: AudioFormat) -> anyhow::Result<Self> {
+    /// Open a capture in `format` for `client`, coded as `codec`, Opus at
+    /// `bitrate` bits per second. Blocks until PipeWire has taken the stream or
+    /// refused it, so it belongs on a blocking thread.
+    pub fn start(client: ClientId, codec: Codec, format: AudioFormat, bitrate: u32) -> anyhow::Result<Self> {
         let speaker = Lease::take()?;
-        let encoder = FlacEncoder::new(format).context("setting up the FLAC encoder")?;
+        let encoder = AudioEncoder::new(codec, format, bitrate).with_context(|| format!("setting up the {codec:?} encoder"))?;
         let queue = Arc::new(Queue {
             buffers: Mutex::new(VecDeque::with_capacity(QUEUE_DEPTH)),
             ready: Notify::new(),
-            dropped: std::sync::atomic::AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            bitrate: AtomicU32::new(bitrate),
         });
         let (quit, quit_rx) = pw::channel::channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let thread_queue = queue.clone();
         let thread = std::thread::Builder::new()
             .name(format!("audio-{}", client.0))
-            .spawn(move || run(client, format, encoder, thread_queue, quit_rx, ready_tx))
+            .spawn(move || run(client, codec, format, encoder, thread_queue, quit_rx, ready_tx))
             .context("spawning the audio thread")?;
         let mut capture = Self { quit, thread: Some(thread), queue, _speaker: speaker };
         match ready_rx.recv_timeout(START_TIMEOUT) {
@@ -124,7 +131,13 @@ impl Capture {
         }
     }
 
-    /// The oldest FLAC frame message not yet sent, if any.
+    /// Move the rate Opus is coded at to `bitrate` bits per second, from the
+    /// capture's next buffer on. Nothing to a FLAC stream.
+    pub fn set_bitrate(&self, bitrate: u32) {
+        self.queue.bitrate.store(bitrate, Ordering::Relaxed);
+    }
+
+    /// The oldest frame message not yet sent, if any.
     pub fn take(&self) -> Option<Vec<u8>> {
         self.queue.buffers.lock().unwrap().pop_front()
     }
@@ -141,7 +154,7 @@ impl Drop for Capture {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        let dropped = self.queue.dropped.load(std::sync::atomic::Ordering::Relaxed);
+        let dropped = self.queue.dropped.load(Ordering::Relaxed);
         if dropped > 0 {
             debug!("audio: {dropped} frame(s) were dropped for a session that fell behind");
         }
@@ -162,8 +175,9 @@ fn spa_format(sample: SampleFormat) -> spa::param::audio::AudioFormat {
 /// once, when the stream is connected or when that failed.
 fn run(
     client: ClientId,
+    codec: Codec,
     format: AudioFormat,
-    mut encoder: FlacEncoder,
+    mut encoder: AudioEncoder,
     queue: Arc<Queue>,
     quit: pw::channel::Receiver<()>,
     ready: std::sync::mpsc::Sender<anyhow::Result<()>>,
@@ -200,6 +214,7 @@ fn run(
 
     let frame_bytes = format.frame_bytes();
     let process_queue = queue.clone();
+    let mut bitrate = queue.bitrate.load(Ordering::Relaxed);
     let _listener = up!(
         stream
             .add_local_listener::<()>()
@@ -223,6 +238,15 @@ fn run(
                 if whole == 0 {
                     return;
                 }
+                let wanted = process_queue.bitrate.load(Ordering::Relaxed);
+                if wanted != bitrate {
+                    bitrate = wanted;
+                    // A stream at the rate it had is still a stream.
+                    match encoder.set_bitrate(wanted) {
+                        Ok(()) => debug!("client {}: audio now at {wanted} bit/s", client.0),
+                        Err(e) => warn!("client {}: audio stays at its rate: {e}", client.0),
+                    }
+                }
                 let frames = match encoder.push(&bytes[start..start + whole]) {
                     Ok(frames) => frames,
                     Err(e) => {
@@ -237,7 +261,7 @@ fn run(
                 for frame in frames {
                     if buffers.len() >= QUEUE_DEPTH {
                         buffers.pop_front();
-                        process_queue.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        process_queue.dropped.fetch_add(1, Ordering::Relaxed);
                     }
                     buffers.push_back(frame);
                 }
@@ -279,7 +303,7 @@ fn run(
     let loop_ = mainloop.clone();
     let _quit = quit.attach(mainloop.loop_(), move |()| loop_.quit());
     info!(
-        "client {}: capturing the speaker's monitor as {:?} x{} at {} Hz, {frames} frames a buffer",
+        "client {}: capturing the speaker's monitor as {:?} x{} at {} Hz, {frames} frames a buffer, for {codec:?}",
         client.0, format.sample, format.channels, format.frequency
     );
     let _ = ready.send(Ok(()));

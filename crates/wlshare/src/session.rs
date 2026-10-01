@@ -72,7 +72,9 @@
 //! rectangle in an update of its own, which waits for a request like any other
 //! announcement. Its enable opens a PipeWire capture in the format it set
 //! ([`crate::audio`]), answered with *begin*; its disable, or its leaving,
-//! closes the capture, answered with *end*. The capture's FLAC frames ride the
+//! closes the capture, answered with *end*. The sound is FLAC, or Opus for a
+//! client whose list says so, at the rate it names; neither is configured
+//! here. The capture's frames ride the
 //! same connection as the pixels, and go first: every pass of the loop drains
 //! what the capture has queued before it considers a framebuffer update, so
 //! sound waits for at most the update already being written, never for the
@@ -124,7 +126,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use log::{debug, info, warn};
-use wlshare_rfb::audio::{AudioFormat, audio_begin, audio_end, audio_rect};
+use wlshare_rfb::audio::{AudioFormat, Codec, OPUS_BITRATE_DEFAULT, audio_begin, audio_end, audio_rect};
 use wlshare_rfb::camera::{CameraFormat, camera_available, camera_keyframe, camera_start, camera_stop};
 use wlshare_rfb::clipboard::{self, Caps, Message as ClipboardMessage};
 use wlshare_rfb::cursor::{alpha_cursor_rect, cursor_rect};
@@ -282,6 +284,8 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
         audio_supported: false,
         announce_audio: false,
         audio_format: AudioFormat::DEFAULT,
+        audio_codec: Codec::Flac,
+        audio_bitrate: OPUS_BITRATE_DEFAULT,
         audio: None,
         camera_supported: false,
         camera: None,
@@ -446,6 +450,11 @@ struct Session {
     announce_audio: bool,
     /// The sample format the client set, or the extension's default.
     audio_format: AudioFormat,
+    /// What the sound is coded as, which the client's list says ([`Codec`]).
+    audio_codec: Codec,
+    /// The rate the client set for Opus, in bits per second, or the
+    /// extension's default.
+    audio_bitrate: u32,
     /// The capture, while the client has audio enabled.
     audio: Option<Capture>,
     /// The client listed the camera pseudo-encoding and the configuration
@@ -605,7 +614,7 @@ impl Session {
         Ok(())
     }
 
-    /// Send every FLAC frame the capture has queued.
+    /// Send every frame the capture has queued.
     async fn flush_audio(&mut self, writer: &mut Writer) -> anyhow::Result<()> {
         while let Some(frame) = self.audio.as_ref().and_then(Capture::take) {
             writer.send(&frame).await.context("writing audio")?;
@@ -613,12 +622,12 @@ impl Session {
         Ok(())
     }
 
-    /// Open the capture in the client's format and say so. A capture that
+    /// Open the capture in the client's format and codec and say so. A capture that
     /// cannot be opened is logged and leaves the client without sound, not
     /// without a desktop.
     async fn start_audio(&mut self, writer: &mut Writer) -> anyhow::Result<()> {
-        let (id, format) = (self.id, self.audio_format);
-        match tokio::task::spawn_blocking(move || Capture::start(id, format)).await.context("the audio thread did not start")? {
+        let (id, codec, format, bitrate) = (self.id, self.audio_codec, self.audio_format, self.audio_bitrate);
+        match tokio::task::spawn_blocking(move || Capture::start(id, codec, format, bitrate)).await.context("the audio thread did not start")? {
             Ok(capture) => {
                 self.audio = Some(capture);
                 writer.send(&audio_begin()).await?;
@@ -637,6 +646,25 @@ impl Session {
             info!("client {}: audio stopped", self.id.0);
         }
         Ok(())
+    }
+
+    /// Close a running capture and open it again as the client now asks for
+    /// it, with the speaker held across, so the desktop keeps playing into it
+    /// rather than on the host between the two captures.
+    async fn restart_audio(&mut self, writer: &mut Writer) -> anyhow::Result<()> {
+        if self.audio.is_none() {
+            return Ok(());
+        }
+        let speaker = tokio::task::spawn_blocking(Lease::take).await.context("the speaker thread did not start")??;
+        let restarted = async {
+            self.stop_audio(writer).await?;
+            self.start_audio(writer).await
+        }
+        .await;
+        // The last hold, when the new capture did not start, joins the
+        // speaker's thread.
+        tokio::task::spawn_blocking(move || drop(speaker)).await.context("the speaker thread did not stop")?;
+        restarted
     }
 
     async fn handle(&mut self, message: ClientMsg, writer: &mut Writer) -> anyhow::Result<()> {
@@ -744,6 +772,17 @@ impl Session {
                     // announced, and a running stream ends.
                     self.announce_audio = false;
                     self.stop_audio(writer).await?;
+                }
+                let codec = Codec::listed(&encodings);
+                if audio && codec != self.audio_codec {
+                    info!("client {}: asked for the sound as {codec:?}", self.id.0);
+                }
+                // A codec changed while the stream runs restarts it in the new
+                // one, between an end and a begin.
+                let recode = audio && codec != self.audio_codec;
+                self.audio_codec = codec;
+                if recode {
+                    self.restart_audio(writer).await?;
                 }
                 let camera = has(ENCODING_CAMERA);
                 if camera && !self.config.camera && !self.camera_supported {
@@ -931,20 +970,20 @@ impl Session {
                 }
                 debug!("client {}: wants audio as {:?} x{} at {} Hz", self.id.0, format.sample, format.channels, format.frequency);
                 self.audio_format = format;
-                // A format set while the stream runs restarts it in the new one,
-                // with the speaker held across, so the desktop keeps playing
-                // into it rather than on the host between the two captures.
-                if self.audio.is_some() {
-                    let speaker = tokio::task::spawn_blocking(Lease::take).await.context("the speaker thread did not start")??;
-                    let restarted = async {
-                        self.stop_audio(writer).await?;
-                        self.start_audio(writer).await
-                    }
-                    .await;
-                    // The last hold, when the new capture did not start, joins the
-                    // speaker's thread.
-                    tokio::task::spawn_blocking(move || drop(speaker)).await.context("the speaker thread did not stop")?;
-                    restarted?;
+                // A format set while the stream runs restarts it in the new one.
+                self.restart_audio(writer).await?;
+            }
+            ClientMsg::AudioBitrate(bitrate) => {
+                if !self.audio_supported {
+                    warn!("client {}: sets an audio bitrate without the extension; ignored", self.id.0);
+                    return Ok(());
+                }
+                debug!("client {}: wants Opus at {bitrate} bit/s", self.id.0);
+                self.audio_bitrate = bitrate;
+                // A running stream moves to it with no restart: every Opus
+                // packet states its own coding.
+                if let Some(capture) = &self.audio {
+                    capture.set_bitrate(bitrate);
                 }
             }
             ClientMsg::CameraPlug(format) => {

@@ -517,6 +517,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-opus"
+version = "0.0.1"
+source = "git+https://github.com/andrewtheguy/desktop-opus?tag=v0.0.1#5ad2c18a5ef8e269bdfe23c0133f72094ba22867"
+dependencies = [
+ "opus-prebuilt",
+ "thiserror",
+]
+
+[[package]]
 name = "desktop-vp9"
 version = "0.0.5"
 source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.5#b4f1c659d9d48c0ee9f821de7b275ba0e854622b"
@@ -780,6 +789,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "libopus-prebuilt-sys"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260906161304-8dd83e8#8dd83e865b4913df74b66199236346f9bfab2912"
+
+[[package]]
 name = "libspa"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -907,6 +921,14 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "opus-prebuilt"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260906161304-8dd83e8#8dd83e865b4913df74b66199236346f9bfab2912"
+dependencies = [
+ "libopus-prebuilt-sys",
+]
 
 [[package]]
 name = "password-hash"
@@ -1675,6 +1697,7 @@ version = "0.0.46"
 dependencies = [
  "aes",
  "desktop-flac",
+ "desktop-opus",
  "desktop-vp9",
  "eax",
  "flate2",

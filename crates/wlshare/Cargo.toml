@@ -61,8 +61,9 @@ priority = "optional"
 # libpipewire, libpam and libavcodec/libavutil (the camera's H.264 decoder) are
 # linked, so $auto names them from the binary.
 # wayland-client loads libwayland-client at runtime, and desktop-flac loads libFLAC,
-# the audio extension's encoder, the same way, so dpkg-shlibdeps can see neither;
-# libflac14 is trixie's libFLAC.
+# the audio extension's FLAC encoder, the same way, so dpkg-shlibdeps can see
+# neither; libflac14 is trixie's libFLAC. libopus, its Opus encoder, is linked
+# statically and needs nothing.
 # wlroots is the compositor's, not linked here: 0.19 is the first whose headless
 # backend keeps the cursor out of a screencopy without overlay_cursor.
 # libpipewire is only the client library: the speaker, the camera and the

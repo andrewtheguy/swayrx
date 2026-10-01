@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The RFB wire wlshare speaks: message parsing and building, RSA-AES, the ZRLE encoder, the VP9 encoding, the FLAC audio and the private extensions"
+description = "The RFB wire wlshare speaks: message parsing and building, RSA-AES, the ZRLE encoder, the VP9 encoding, the FLAC and Opus audio and the private extensions"
 
 # Platform-independent and dependency-light on purpose: this crate is where the
 # bytes on the wire are decided, and it must build and unit-test on any OS,
@@ -32,6 +32,12 @@ sha2 = "0.11"
 # loads the system's shared library at run time, so nothing of FLAC is compiled
 # or linked.
 desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.2" }
+# The audio extension's Opus packets, for a client that asks for them in place
+# of FLAC: the one place a desktop's sound is coded as Opus, for this workspace
+# and for the remotex gateway, each pinned to its release tag. libopus is linked
+# from a prebuilt static archive, so nothing of it is compiled here or looked
+# for at run time.
+desktop-opus = { git = "https://github.com/andrewtheguy/desktop-opus", tag = "v0.0.1" }
 # The VP9 encoding's codec: the one place libvpx is spoken to, for this
 # workspace and for the remotex gateway, each pinned to its release tag.
 desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
