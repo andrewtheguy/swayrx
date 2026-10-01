@@ -51,8 +51,9 @@
 //! remotex gateway hands each packet to the browser as it came, where it would
 //! otherwise decode the FLAC and code Opus itself. A packet is twenty
 //! milliseconds too, at the one frame size the whole stream keeps, and decodes
-//! from the packets before it as any Opus stream does, so a dropped one is
-//! concealed by the decoder rather than heard as a gap. The format's frequency
+//! from the packets before it as any Opus stream does, and nothing on the
+//! wire numbers them, so a server must send every packet it coded: one that
+//! has to lose sound loses it before the encoder. The format's frequency
 //! must be one Opus codes at ([`OPUS_FREQUENCIES`]); its sample format says
 //! only what the capture hands the encoder, since what an Opus decoder gives
 //! back is its own business. The coding is `desktop-opus`'s, the one place a

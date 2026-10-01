@@ -554,8 +554,9 @@ what the capture hands the encoder, an unsigned sample flipped as for FLAC and
 an 8-bit one widened to sixteen: what a decoder gives back is its own business.
 No `OpusHead` is sent. A client builds it from the format it set, with a
 pre-skip of 312, the encoder's lookahead in 48 kHz samples at every frequency.
-A packet decodes from the ones before it, so one dropped for a client that fell
-behind is concealed by its decoder rather than heard as a hole.
+A packet decodes from the ones before it and the wire numbers none, so a client
+could not tell one was missing: wlshare drops no packet it coded, and a client
+that fell behind loses sound that was never coded instead.
 
 It is the choice of a client whose own listener takes Opus: the remotex gateway
 hands each packet to the browser as it came, where it would otherwise decode
@@ -601,9 +602,11 @@ keeps it off the session's task, which has pixels to compress; a 20 ms buffer
 takes a fraction of a millisecond. The encoder keeps what does not fill a frame
 for the next buffer — PipeWire honours its own quantum before settling on the
 requested one, so the first buffers of a session are often shorter than 20 ms —
-and queues each frame it completes in a sixteen-deep queue, dropping the oldest
-when a client cannot keep up: each FLAC frame decodes on its own, so a dropped
-one is a 20 ms hole, and a stalled capture callback is worse. A set-format on a
+and queues each frame it completes in a sixteen-deep queue. When a client cannot
+keep up, FLAC drops the oldest: each frame decodes on its own, so a dropped one
+is a 20 ms hole, and a stalled capture callback is worse. Opus leaves a buffer
+uncoded while the queue is full instead, so the decoder is handed every packet
+the encoder made and the two stay in step across the hole. A set-format on a
 running stream, or a list that changes its codec, restarts the capture as now
 asked for, holding the speaker
 across so the host is not heard between the two captures, and a disable or a

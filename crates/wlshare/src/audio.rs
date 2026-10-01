@@ -32,10 +32,13 @@
 //! every application on the host an xrun. The thread this capture already owns
 //! is the right place for it, and off the session's task, which has pixels to
 //! compress; a twenty-millisecond buffer takes a fraction of a millisecond to
-//! encode. A session that falls behind loses the oldest frames, never the
+//! encode. A session that falls behind loses the oldest FLAC frames, never the
 //! newest, so what it does send is live, and each FLAC frame decodes on its
-//! own, so a lost one costs the client nothing but its own samples; a lost
-//! Opus packet is concealed by the client's decoder.
+//! own, so a lost one costs the client nothing but its own samples. An Opus
+//! packet decodes from the ones before it and the wire numbers none, so a
+//! client could not tell one was missing: no coded packet is dropped, and
+//! what a session that fell behind loses is the sound not coded while its
+//! queue was full, which leaves the encoder and the decoder in step.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -54,7 +57,8 @@ use wlshare_rfb::audio::{AudioEncoder, AudioFormat, Codec, SampleFormat};
 
 use crate::shared::ClientId;
 
-/// Frames kept for a session slow to send them; the oldest goes first.
+/// Frames kept for a session slow to send them: past it the oldest FLAC frame
+/// goes, and Opus is not coded.
 const QUEUE_DEPTH: usize = 16;
 /// How long PipeWire may take to come up before an enable is refused.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -91,6 +95,38 @@ struct Queue {
     /// The rate Opus is to be coded at, in bits per second, which the capture
     /// thread moves its encoder to before the next buffer.
     bitrate: AtomicU32,
+}
+
+impl Queue {
+    /// Whether a buffer is to go uncoded: a stream whose packets each decode
+    /// from the last ([`Codec::Opus`]) and a queue with no room. Counted as
+    /// dropped when it is.
+    fn skips(&self, codec: Codec) -> bool {
+        let full = codec == Codec::Opus && self.buffers.lock().unwrap().len() >= QUEUE_DEPTH;
+        if full {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        full
+    }
+
+    /// Queue the frames a buffer completed and wake the session. A FLAC frame
+    /// pushes the oldest out of a full queue; an Opus packet is kept whatever
+    /// the queue holds, since [`Queue::skips`] stopped the coding instead.
+    fn put(&self, codec: Codec, frames: Vec<Vec<u8>>) {
+        if frames.is_empty() {
+            return;
+        }
+        let mut buffers = self.buffers.lock().unwrap();
+        for frame in frames {
+            if codec == Codec::Flac && buffers.len() >= QUEUE_DEPTH {
+                buffers.pop_front();
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            buffers.push_back(frame);
+        }
+        drop(buffers);
+        self.ready.notify_one();
+    }
 }
 
 impl Capture {
@@ -156,7 +192,7 @@ impl Drop for Capture {
         }
         let dropped = self.queue.dropped.load(Ordering::Relaxed);
         if dropped > 0 {
-            debug!("audio: {dropped} frame(s) were dropped for a session that fell behind");
+            debug!("audio: {dropped} frame(s) or buffer(s) were dropped for a session that fell behind");
         }
     }
 }
@@ -238,6 +274,9 @@ fn run(
                 if whole == 0 {
                     return;
                 }
+                if process_queue.skips(codec) {
+                    return;
+                }
                 let wanted = process_queue.bitrate.load(Ordering::Relaxed);
                 if wanted != bitrate {
                     bitrate = wanted;
@@ -254,19 +293,7 @@ fn run(
                         return;
                     }
                 };
-                if frames.is_empty() {
-                    return;
-                }
-                let mut buffers = process_queue.buffers.lock().unwrap();
-                for frame in frames {
-                    if buffers.len() >= QUEUE_DEPTH {
-                        buffers.pop_front();
-                        process_queue.dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                    buffers.push_back(frame);
-                }
-                drop(buffers);
-                process_queue.ready.notify_one();
+                process_queue.put(codec, frames);
             })
             .register(),
         "listening to the capture stream"
@@ -481,4 +508,61 @@ fn serve(quit: pw::channel::Receiver<()>, ready: std::sync::mpsc::Sender<anyhow:
     let _ = ready.send(Ok(()));
     mainloop.run();
     debug!("audio: speaker closed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queue() -> Queue {
+        Queue {
+            buffers: Mutex::new(VecDeque::new()),
+            ready: Notify::new(),
+            dropped: AtomicU64::new(0),
+            bitrate: AtomicU32::new(0),
+        }
+    }
+
+    fn held(queue: &Queue) -> Vec<Vec<u8>> {
+        queue.buffers.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// A full queue gives up its oldest FLAC frame for the newest, and FLAC is
+    /// coded whatever the queue holds.
+    #[test]
+    fn a_full_queue_loses_its_oldest_flac_frame() {
+        let queue = queue();
+        for n in 0..QUEUE_DEPTH as u8 + 2 {
+            assert!(!queue.skips(Codec::Flac));
+            queue.put(Codec::Flac, vec![vec![n]]);
+        }
+        let held = held(&queue);
+        assert_eq!(held.len(), QUEUE_DEPTH);
+        assert_eq!((held[0][0], held[QUEUE_DEPTH - 1][0]), (2, QUEUE_DEPTH as u8 + 1));
+        assert_eq!(queue.dropped.load(Ordering::Relaxed), 2);
+    }
+
+    /// No Opus packet that was coded is dropped, a decoder having no way to
+    /// know of it: a full queue stops the coding, and it starts again once the
+    /// session has taken a packet.
+    #[test]
+    fn a_full_queue_stops_opus_being_coded_and_keeps_every_packet() {
+        let queue = queue();
+        for n in 0..QUEUE_DEPTH as u8 - 1 {
+            assert!(!queue.skips(Codec::Opus));
+            queue.put(Codec::Opus, vec![vec![n]]);
+        }
+        // One buffer that completed two packets takes the queue past its depth.
+        assert!(!queue.skips(Codec::Opus));
+        queue.put(Codec::Opus, vec![vec![100], vec![101]]);
+        assert!(queue.skips(Codec::Opus));
+        assert!(queue.skips(Codec::Opus));
+        let all = held(&queue);
+        assert_eq!(all.len(), QUEUE_DEPTH + 1);
+        assert_eq!((all[0][0], all[QUEUE_DEPTH][0]), (0, 101));
+        assert_eq!(queue.dropped.load(Ordering::Relaxed), 2);
+
+        queue.buffers.lock().unwrap().drain(..2);
+        assert!(!queue.skips(Codec::Opus));
+    }
 }

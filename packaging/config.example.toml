@@ -51,8 +51,7 @@ max_fps = 60
 # once, as one frame, when a desktop left coarse has been quiet half a second.
 # Where quality gives way to frames is built into the encoder, as in every
 # adaptive stream, so there is no floor to set. Higher is sharper
-# and larger. 90, because wlshare is mostly used on a LAN, which has the room;
-# the sound is lossless already, and the picture need not be the weak link.
+# and larger. 90, because wlshare is mostly used on a LAN, which has the room.
 vp9_quality = 90
 
 # Seconds a connection has to finish the handshake — the security exchange and
