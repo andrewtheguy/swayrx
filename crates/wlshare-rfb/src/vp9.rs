@@ -28,13 +28,13 @@
 //! at exactly the dial's quality at the time. The client's pixel format does
 //! not apply to this encoding; what it decodes to is its own business.
 //!
-//! The coding itself is [`desktop_vp9`]'s, the one place libvpx is spoken to
+//! The coding itself is [`screen_vp9`]'s, the one place libvpx is spoken to
 //! for wlshare and for the remotex gateway alike. What this module owns is the
 //! framing — the length word and its ceiling — and the framebuffer's pixels in.
 
 use thiserror::Error;
 
-pub use desktop_vp9::{Chroma, QUALITY_MAX, QUALITY_MIN};
+pub use screen_vp9::{Chroma, QUALITY_MAX, QUALITY_MIN};
 
 /// Listed beside [`crate::ENCODING_VP9`], asks for the stream at 4:2:0 (VP9
 /// profile 0) in place of 4:4:4: the ASCII bytes `WLS0`. The remotex gateway
@@ -108,7 +108,7 @@ impl Vp9Stream {
 pub enum Vp9Error {
     /// The codec, or the pixels in front of it, refused.
     #[error(transparent)]
-    Codec(#[from] desktop_vp9::Error),
+    Codec(#[from] screen_vp9::Error),
     #[error("a frame of {0} bytes is over the {max}-byte ceiling", max = crate::msg::MAX_RECT_BODY)]
     FrameTooLong(usize),
     #[cfg(test)]
@@ -152,16 +152,16 @@ fn decoder_threads() -> usize {
 /// framebuffer of another size needs another encoder, whose first frame is a
 /// keyframe by construction.
 pub struct Vp9Encoder {
-    encoder: desktop_vp9::Encoder,
-    picture: desktop_vp9::Picture,
+    encoder: screen_vp9::Encoder,
+    picture: screen_vp9::Picture,
 }
 
 impl Vp9Encoder {
     /// An encoder for a `width`×`height` picture at `chroma` and `quality`
     /// (1–100).
     pub fn new(width: u16, height: u16, chroma: Chroma, quality: u8) -> Result<Self, Vp9Error> {
-        let picture = desktop_vp9::Picture::new(width, height, chroma)?;
-        let encoder = desktop_vp9::Encoder::new(width, height, chroma, quality, encoder_threads())?;
+        let picture = screen_vp9::Picture::new(width, height, chroma)?;
+        let encoder = screen_vp9::Encoder::new(width, height, chroma, quality, encoder_threads())?;
         Ok(Self { encoder, picture })
     }
 
@@ -225,13 +225,13 @@ impl Vp9Encoder {
 /// they arrive, since each frame is coded against the ones before it.
 #[cfg(test)]
 struct Vp9Decoder {
-    decoder: desktop_vp9::Decoder,
+    decoder: screen_vp9::Decoder,
 }
 
 #[cfg(test)]
 impl Vp9Decoder {
     fn new() -> Result<Self, Vp9Error> {
-        Ok(Self { decoder: desktop_vp9::Decoder::new(decoder_threads())? })
+        Ok(Self { decoder: screen_vp9::Decoder::new(decoder_threads())? })
     }
 
     /// Decode a VP9 rectangle payload — the frame, without its length word —
@@ -255,7 +255,7 @@ impl Vp9Decoder {
 }
 
 /// The encoder read back by the decoder, through the rectangle's framing. The
-/// coding itself is proved in `desktop-vp9`; what these hold is the half this
+/// coding itself is proved in `screen-vp9`; what these hold is the half this
 /// module owns — the length word, its ceiling, the pixels in and out — and
 /// that a client's decoder refuses what the encoding does not carry.
 #[cfg(test)]
@@ -294,7 +294,7 @@ mod tests {
         let (pixels, at) = stems(width, height);
         let mut encoder = Vp9Encoder::new(width as u16, height as u16, Chroma::Full, QUALITY_MAX).unwrap();
         let frame = encode(&mut encoder, &pixels, false);
-        assert!(desktop_vp9::frame_header(&frame).is_some_and(|header| header.keyframe && header.profile == 1), "an encoder's first frame is a 4:4:4 keyframe");
+        assert!(screen_vp9::frame_header(&frame).is_some_and(|header| header.keyframe && header.profile == 1), "an encoder's first frame is a 4:4:4 keyframe");
 
         let mut decoder = Vp9Decoder::new().unwrap();
         let stride = width * 4 + 8;
@@ -331,7 +331,7 @@ mod tests {
                 assert_eq!(encoder.quality(), QUALITY_MAX);
             }
             let frame = encode(&mut encoder, &pixels, step == 3);
-            let header = desktop_vp9::frame_header(&frame).expect("a VP9 frame");
+            let header = screen_vp9::frame_header(&frame).expect("a VP9 frame");
             assert_eq!(header.keyframe, step == 0 || step == 3, "frame {step}");
             decoder.decode_rect(&frame, width, height, &mut out, width * 4).unwrap();
             let lit = &out[(step * 4 + 4) * 4..][..3];
@@ -347,16 +347,16 @@ mod tests {
         let mut decoder = Vp9Decoder::new().unwrap();
         assert!(matches!(decoder.decode_rect(&frame, 16, 16, &mut out, 64), Err(Vp9Error::Size(32, 16, 16, 16))));
         assert!(decoder.decode_rect(&[0xFF, 0x00, 0x12], 32, 16, &mut out, 128).is_err());
-        assert!(matches!(decoder.decode_rect(&frame, 32, 16, &mut out[..10], 128), Err(Vp9Error::Codec(desktop_vp9::Error::Buffer { .. }))));
-        assert!(matches!(Vp9Encoder::new(0, 16, Chroma::Full, 60), Err(Vp9Error::Codec(desktop_vp9::Error::Empty(0, 16)))));
-        assert!(matches!(encoder.encode_rect(&[0; 12], 128, false, &mut Vec::new()), Err(Vp9Error::Codec(desktop_vp9::Error::Buffer { .. }))));
+        assert!(matches!(decoder.decode_rect(&frame, 32, 16, &mut out[..10], 128), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
+        assert!(matches!(Vp9Encoder::new(0, 16, Chroma::Full, 60), Err(Vp9Error::Codec(screen_vp9::Error::Empty(0, 16)))));
+        assert!(matches!(encoder.encode_rect(&[0; 12], 128, false, &mut Vec::new()), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
 
         // A 4:2:0 frame, which the gateway asks for, is a VP9 frame of the
         // same framing — and not one a 4:4:4 decoder takes.
         let mut subsampled = Vp9Encoder::new(32, 16, Chroma::Subsampled, 60).unwrap();
         assert_eq!(subsampled.chroma(), Chroma::Subsampled);
         let frame = encode(&mut subsampled, &[0u8; 32 * 16 * 4], false);
-        assert_eq!(desktop_vp9::frame_header(&frame).expect("a VP9 frame").profile, 0);
+        assert_eq!(screen_vp9::frame_header(&frame).expect("a VP9 frame").profile, 0);
         assert!(matches!(Vp9Decoder::new().unwrap().decode_rect(&frame, 32, 16, &mut out, 128), Err(Vp9Error::Chroma("4:2:0"))));
     }
 }

@@ -508,35 +508,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "desktop-flac"
-version = "0.0.3"
-source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.3#752f65c3ca4be067f29417b1bdd1a113e091845b"
-dependencies = [
- "libflac-prebuilt-sys",
- "thiserror",
-]
-
-[[package]]
-name = "desktop-opus"
-version = "0.0.1"
-source = "git+https://github.com/andrewtheguy/desktop-opus?tag=v0.0.1#5ad2c18a5ef8e269bdfe23c0133f72094ba22867"
-dependencies = [
- "opus-prebuilt",
- "thiserror",
-]
-
-[[package]]
-name = "desktop-vp9"
-version = "0.0.5"
-source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.5#b4f1c659d9d48c0ee9f821de7b275ba0e854622b"
-dependencies = [
- "libvpx-prebuilt-sys",
- "log",
- "thiserror",
- "yuv",
-]
-
-[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1170,6 +1141,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "screen-vp9"
+version = "0.0.6"
+source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.6#0014571b707973893adf6c077c8904fee1b00408"
+dependencies = [
+ "libvpx-prebuilt-sys",
+ "log",
+ "thiserror",
+ "yuv",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1292,6 +1274,24 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys",
+]
+
+[[package]]
+name = "sound-flac"
+version = "0.0.4"
+source = "git+https://github.com/andrewtheguy/sound-flac?tag=v0.0.4#94ee467d6b7439ee9ae152b7b864ecb08ebc0a7a"
+dependencies = [
+ "libflac-prebuilt-sys",
+ "thiserror",
+]
+
+[[package]]
+name = "sound-opus"
+version = "0.0.2"
+source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.2#57147b529bd836abc2fca562c6936e5b74a71e7d"
+dependencies = [
+ "opus-prebuilt",
+ "thiserror",
 ]
 
 [[package]]
@@ -1659,14 +1659,13 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "wlshare"
-version = "0.0.51"
+version = "0.0.52"
 dependencies = [
  "anyhow",
  "argon2",
  "calloop",
  "calloop-wayland-source",
  "clap",
- "desktop-vp9",
  "env_logger",
  "ffmpeg-sys-next",
  "libc",
@@ -1674,6 +1673,7 @@ dependencies = [
  "memmap2",
  "pipewire",
  "rustix",
+ "screen-vp9",
  "serde",
  "thiserror",
  "tokio",
@@ -1688,19 +1688,19 @@ dependencies = [
 
 [[package]]
 name = "wlshare-rfb"
-version = "0.0.51"
+version = "0.0.52"
 dependencies = [
  "aes",
- "desktop-flac",
- "desktop-opus",
- "desktop-vp9",
  "eax",
  "flate2",
  "pkcs8",
  "rand",
  "rsa",
+ "screen-vp9",
  "sha1",
  "sha2",
+ "sound-flac",
+ "sound-opus",
  "subtle",
  "symphonia-bundle-flac",
  "symphonia-core",

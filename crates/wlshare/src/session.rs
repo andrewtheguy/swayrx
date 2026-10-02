@@ -39,7 +39,7 @@
 //! being listed anew also asks for one. The encode runs on this task's worker,
 //! told it is blocking, and the fence keeps it to one frame in flight as it does
 //! a standard pixel update. Its quality starts at the configured one and follows
-//! the link through desktop-vp9's quality walk: each frame's fence, answered
+//! the link through screen-vp9's quality walk: each frame's fence, answered
 //! once the client has the frame — remotex answers once the browser has taken
 //! it, so the walk reads the whole path to the screen — is how long that frame
 //! took, and a client without Fence is measured by how long writing the frame
@@ -152,7 +152,7 @@ use crate::auth::Login;
 use crate::camera::{Camera, Signal as CameraSignal};
 use crate::framebuffer::{Rect, ResizeOrigin};
 use crate::microphone::{Microphone, Signal as MicrophoneSignal};
-use desktop_vp9::walk::{Pace, QualityWalk};
+use screen_vp9::walk::{Pace, QualityWalk};
 use crate::shared::{ClientId, Command, Event, Shared};
 
 /// What the server offers at the security step, and what it checks the client

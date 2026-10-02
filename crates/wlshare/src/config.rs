@@ -39,7 +39,7 @@ pub struct Config {
     /// The finest quality, 1–100, of the VP9 encoding a client may ask for
     /// instead of a standard pixel encoding ([`wlshare_rfb::vp9`]). A session
     /// starts there and gives quality up while its client falls behind
-    /// (`desktop_vp9::walk`), then frames, from a floor of the encoder's own; a
+    /// (`screen_vp9::walk`), then frames, from a floor of the encoder's own; a
     /// desktop that has gone quiet is sharpened back here.
     #[serde(default = "default_vp9_quality")]
     pub vp9_quality: u8,

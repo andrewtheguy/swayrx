@@ -31,16 +31,16 @@ sha2 = "0.11"
 # this workspace and for the remotex gateway, each pinned to its release tag. It
 # links libFLAC from a prebuilt static archive its sys crate downloads, so no C
 # is compiled and nothing is looked for at run time.
-desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.3" }
+sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.4" }
 # The audio extension's Opus packets, for a client that asks for them in place
 # of FLAC: the one place a desktop's sound is coded as Opus, for this workspace
 # and for the remotex gateway, each pinned to its release tag. libopus is linked
 # from a prebuilt static archive, so nothing of it is compiled here or looked
 # for at run time.
-desktop-opus = { git = "https://github.com/andrewtheguy/desktop-opus", tag = "v0.0.1" }
+sound-opus = { git = "https://github.com/andrewtheguy/sound-opus", tag = "v0.0.2" }
 # The VP9 encoding's codec: the one place libvpx is spoken to, for this
 # workspace and for the remotex gateway, each pinned to its release tag.
-desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.6" }
 
 [dev-dependencies]
 # The FLAC encoder's tests read every frame back with symphonia's decoder,
