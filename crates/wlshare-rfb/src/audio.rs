@@ -106,8 +106,6 @@ pub const CLIENT_AUDIO_BITRATE_LEN: usize = 8;
 /// The rates Opus codes at, in Hz: the only frequencies a format coded as Opus
 /// may have.
 pub use sound_opus::RATES as OPUS_FREQUENCIES;
-/// The Opus rate, in bits per second, of a stream whose client named none.
-pub use sound_opus::BITRATE_DEFAULT as OPUS_BITRATE_DEFAULT;
 /// The lowest and highest Opus rates a client may ask for, in bits per second.
 pub use sound_opus::{BITRATE_MAX as OPUS_BITRATE_MAX, BITRATE_MIN as OPUS_BITRATE_MIN};
 /// The most bytes one Opus packet is.
@@ -336,6 +334,10 @@ pub enum AudioEncodeError {
     /// libFLAC refused the stream or a block of it.
     #[error(transparent)]
     Flac(#[from] sound_flac::Error),
+    /// The client enabled Opus without ever setting its rate: the stream has
+    /// no rate of its own to start at, and the client knows what it wants.
+    #[error("an Opus stream needs a set-bitrate before its enable")]
+    NoBitrate,
 }
 
 /// A frame message with nothing in it yet: the header, its length to be
@@ -508,11 +510,12 @@ pub enum AudioEncoder {
 
 impl AudioEncoder {
     /// An encoder of `codec` for `format`; `bitrate`, in bits per second, is
-    /// the rate Opus starts at, and nothing to FLAC.
-    pub fn new(codec: Codec, format: AudioFormat, bitrate: u32) -> Result<Self, AudioEncodeError> {
+    /// the rate Opus starts at, which it has to have been set, and nothing to
+    /// FLAC.
+    pub fn new(codec: Codec, format: AudioFormat, bitrate: Option<u32>) -> Result<Self, AudioEncodeError> {
         Ok(match codec {
             Codec::Flac => Self::Flac(FlacEncoder::new(format)?),
-            Codec::Opus => Self::Opus(OpusEncoder::new(format, bitrate)?),
+            Codec::Opus => Self::Opus(OpusEncoder::new(format, bitrate.ok_or(AudioEncodeError::NoBitrate)?)?),
         })
     }
 
@@ -632,6 +635,20 @@ impl FlacDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rate the tests code Opus at: the one a client names on a stream
+    /// with no rate of its own.
+    const BITRATE: u32 = sound_opus::BITRATE_DEFAULT;
+
+    /// An Opus stream starts at the rate its client set and at none of its
+    /// own; FLAC needs none.
+    #[test]
+    fn an_opus_stream_needs_a_bitrate_and_flac_does_not() {
+        let format = AudioFormat { sample: SampleFormat::S16, channels: 2, frequency: 48_000 };
+        assert!(matches!(AudioEncoder::new(Codec::Opus, format, None), Err(AudioEncodeError::NoBitrate)));
+        assert!(AudioEncoder::new(Codec::Opus, format, Some(BITRATE)).is_ok());
+        assert!(AudioEncoder::new(Codec::Flac, format, None).is_ok());
+    }
 
     #[test]
     fn the_client_operations_parse() {
@@ -870,7 +887,7 @@ mod tests {
         for bitrate in [0, OPUS_BITRATE_MIN - 1, OPUS_BITRATE_MAX + 1, u32::MAX] {
             assert_eq!(set_at(bitrate), Err(AudioParseError::BadBitrate(bitrate)));
         }
-        assert_eq!((OPUS_BITRATE_MIN, OPUS_BITRATE_DEFAULT, OPUS_BITRATE_MAX), (6_000, 96_000, 510_000));
+        assert_eq!((OPUS_BITRATE_MIN, OPUS_BITRATE_MAX), (6_000, 510_000));
     }
 
     /// The codec is FLAC unless the list that asks for the sound says Opus.
@@ -994,7 +1011,7 @@ mod tests {
                     let format = AudioFormat { sample, channels, frequency };
                     let blocks = 25;
                     let pcm = tone(format, blocks * format.block_frames());
-                    let mut encoder = OpusEncoder::new(format, OPUS_BITRATE_DEFAULT).unwrap();
+                    let mut encoder = OpusEncoder::new(format, BITRATE).unwrap();
                     let mut messages = Vec::new();
                     let mut rest = &pcm[..];
                     for frames in [7, 100, format.block_frames() * 2 + 3].iter().cycle() {
@@ -1022,7 +1039,7 @@ mod tests {
         let format = AudioFormat { sample: SampleFormat::S16, channels: 2, frequency: 48_000 };
         let mut pcm = tone(format, 25 * 960);
         pcm.as_chunks_mut::<4>().0.iter_mut().for_each(|frame| frame[2..].fill(0));
-        let messages = OpusEncoder::new(format, OPUS_BITRATE_DEFAULT).unwrap().push(&pcm).unwrap();
+        let messages = OpusEncoder::new(format, BITRATE).unwrap().push(&pcm).unwrap();
         let decoded = decode_opus(format, &messages);
         let (left, right) = (energy(&decoded, 0, 2), energy(&decoded, 1, 2));
         assert!(left > 1_000_000.0 && right * 10.0 < left, "{left} against {right}");
@@ -1035,13 +1052,13 @@ mod tests {
         let good = AudioFormat { sample: SampleFormat::S16, channels: 2, frequency: 48_000 };
         for frequency in [44_100, 11_025, MAX_FREQUENCY] {
             let format = AudioFormat { frequency, ..good };
-            assert!(matches!(OpusEncoder::new(format, OPUS_BITRATE_DEFAULT), Err(AudioEncodeError::Opus(sound_opus::Error::Unsupported(_)))));
-            assert!(matches!(AudioEncoder::new(Codec::Opus, format, OPUS_BITRATE_DEFAULT), Err(AudioEncodeError::Opus(_))));
-            assert!(AudioEncoder::new(Codec::Flac, format, OPUS_BITRATE_DEFAULT).is_ok());
+            assert!(matches!(OpusEncoder::new(format, BITRATE), Err(AudioEncodeError::Opus(sound_opus::Error::Unsupported(_)))));
+            assert!(matches!(AudioEncoder::new(Codec::Opus, format, Some(BITRATE)), Err(AudioEncodeError::Opus(_))));
+            assert!(AudioEncoder::new(Codec::Flac, format, None).is_ok());
         }
-        assert!(matches!(OpusEncoder::new(AudioFormat { channels: 3, ..good }, OPUS_BITRATE_DEFAULT), Err(AudioEncodeError::Unsupported(AudioParseError::BadChannels(3)))));
+        assert!(matches!(OpusEncoder::new(AudioFormat { channels: 3, ..good }, BITRATE), Err(AudioEncodeError::Unsupported(AudioParseError::BadChannels(3)))));
         assert!(matches!(OpusEncoder::new(good, 1), Err(AudioEncodeError::Unsupported(AudioParseError::BadBitrate(1)))));
-        let mut encoder = OpusEncoder::new(good, OPUS_BITRATE_DEFAULT).unwrap();
+        let mut encoder = OpusEncoder::new(good, BITRATE).unwrap();
         assert!(matches!(encoder.set_bitrate(u32::MAX), Err(AudioEncodeError::Unsupported(AudioParseError::BadBitrate(u32::MAX)))));
     }
 
@@ -1050,7 +1067,7 @@ mod tests {
     #[test]
     fn an_opus_packet_waits_for_its_block_and_silence_is_small() {
         let format = AudioFormat { sample: SampleFormat::S16, channels: 2, frequency: 48_000 };
-        let mut encoder = OpusEncoder::new(format, OPUS_BITRATE_DEFAULT).unwrap();
+        let mut encoder = OpusEncoder::new(format, BITRATE).unwrap();
         assert!(encoder.push(&vec![0; 959 * 4]).unwrap().is_empty());
         assert_eq!(encoder.push(&[0; 4]).unwrap().len(), 1);
         let messages = encoder.push(&vec![0; 10 * 960 * 4]).unwrap();
@@ -1065,7 +1082,7 @@ mod tests {
     fn the_opus_rate_moves_on_a_running_stream() {
         let format = AudioFormat { sample: SampleFormat::S16, channels: 2, frequency: 48_000 };
         let pcm = tone(format, 20 * 960);
-        let mut encoder = AudioEncoder::new(Codec::Opus, format, 96_000).unwrap();
+        let mut encoder = AudioEncoder::new(Codec::Opus, format, Some(96_000)).unwrap();
         let before = encoder.push(&pcm).unwrap();
         encoder.set_bitrate(16_000).unwrap();
         let after = encoder.push(&pcm).unwrap();
@@ -1074,7 +1091,7 @@ mod tests {
         let all: Vec<Vec<u8>> = before.into_iter().chain(after).collect();
         assert!(energy(&decode_opus(format, &all), 0, 2) > 1_000_000.0);
 
-        let mut flac = AudioEncoder::new(Codec::Flac, format, 96_000).unwrap();
+        let mut flac = AudioEncoder::new(Codec::Flac, format, None).unwrap();
         flac.set_bitrate(16_000).unwrap();
         assert_eq!(decode(format, &flac.push(&pcm[..960 * 4]).unwrap()), &pcm[..960 * 4]);
     }
@@ -1084,7 +1101,7 @@ mod tests {
     fn the_pre_skip_is_the_encoders_lookahead() {
         assert_eq!(OPUS_PRE_SKIP, 312);
         for rate in OPUS_FREQUENCIES {
-            let mut encoder = sound_opus::Encoder::new(sound_opus::Stream { rate, channels: 2 }, OPUS_BITRATE_DEFAULT).unwrap();
+            let mut encoder = sound_opus::Encoder::new(sound_opus::Stream { rate, channels: 2 }, BITRATE).unwrap();
             assert_eq!(encoder.pre_skip().unwrap(), OPUS_PRE_SKIP);
         }
     }

@@ -552,9 +552,12 @@ lists only `-259`, gtk-vnc for one, hears nothing.
   the stream in the new one, between an end and a begin.
 - **Set bitrate**, client → server, operation `3` beside QEMU's three and
   wlshare's own: the rate Opus is coded at, in bits per second, 6 000 to
-  510 000, libopus's bounds; a rate outside them is fatal. 96 000 where none is
-  set. It may come before the stream or while it runs, and a running one moves
-  to it at its next packet with no restart. A FLAC stream has no rate to move.
+  510 000, libopus's bounds; a rate outside them is fatal. An Opus stream has
+  no rate of its own: one must have been set before its enable, and an enable
+  without one is refused with a log line and no begin, as one at a frequency
+  Opus does not code is. It may come again while the stream runs, and the
+  running stream moves to it at its next packet with no restart. A FLAC stream
+  has no rate to move.
 
 | Offset | Type | Field |
 |---|---|---|

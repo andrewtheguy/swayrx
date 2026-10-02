@@ -126,7 +126,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use log::{debug, info, warn};
-use wlshare_rfb::audio::{AudioFormat, Codec, OPUS_BITRATE_DEFAULT, audio_begin, audio_end, audio_rect};
+use wlshare_rfb::audio::{AudioFormat, Codec, audio_begin, audio_end, audio_rect};
 use wlshare_rfb::camera::{CameraFormat, camera_available, camera_keyframe, camera_start, camera_stop};
 use wlshare_rfb::clipboard::{self, Caps, Message as ClipboardMessage};
 use wlshare_rfb::cursor::{alpha_cursor_rect, cursor_rect};
@@ -289,7 +289,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
         announce_audio: false,
         audio_format: AudioFormat::DEFAULT,
         audio_codec: Codec::Flac,
-        audio_bitrate: OPUS_BITRATE_DEFAULT,
+        audio_bitrate: None,
         audio: None,
         camera_supported: false,
         camera: None,
@@ -456,9 +456,9 @@ struct Session {
     audio_format: AudioFormat,
     /// What the sound is coded as, which the client's list says ([`Codec`]).
     audio_codec: Codec,
-    /// The rate the client set for Opus, in bits per second, or the
-    /// extension's default.
-    audio_bitrate: u32,
+    /// The rate the client set for Opus, in bits per second; `None` until it
+    /// has, and an Opus stream is not started without one.
+    audio_bitrate: Option<u32>,
     /// The capture, while the client has audio enabled.
     audio: Option<Capture>,
     /// The client listed the camera pseudo-encoding and the configuration
@@ -985,7 +985,7 @@ impl Session {
                     return Ok(());
                 }
                 debug!("client {}: wants Opus at {bitrate} bit/s", self.id.0);
-                self.audio_bitrate = bitrate;
+                self.audio_bitrate = Some(bitrate);
                 // A running stream moves to it with no restart: every Opus
                 // packet states its own coding.
                 if let Some(capture) = &self.audio {
