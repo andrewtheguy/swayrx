@@ -224,8 +224,9 @@ otherwise encode from ZRLE's pixels — at the chroma the browser's decoder take
 and the target's own dial, which it names beside the encoding, below. A client
 that does not list it is unchanged.
 
-A client that lists it gets it instead of a standard pixel encoding, wherever
-in the list it is. Each pixel update is then one rectangle covering the whole
+A client that lists it, with a quality beside it (below), gets it instead of a
+standard pixel encoding, wherever in the list it is; listed without one it is
+fatal. Each pixel update is then one rectangle covering the whole
 framebuffer, whose body is a length word and one VP9 frame:
 
 ```text

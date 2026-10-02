@@ -1,7 +1,6 @@
 //! The configuration file: what the server listens on, who may connect, which
-//! output it shares, the quality of the VP9 encoding, whether its sound goes
-//! with it, whether a client may lend it a camera and a microphone, and how the
-//! virtual keyboard is laid out.
+//! output it shares, whether its sound goes with it, whether a client may lend
+//! it a camera and a microphone, and how the virtual keyboard is laid out.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

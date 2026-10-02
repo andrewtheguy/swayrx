@@ -89,9 +89,11 @@ pub const ENCODING_RAW: i32 = 0;
 /// ZRLE, the encoding this server chooses when the client lists it and not
 /// [`ENCODING_VP9`].
 pub const ENCODING_ZRLE: i32 = 16;
-/// The VP9 encoding, the ASCII bytes `WLSV`: a client that lists it is sent
-/// every picture as one rectangle over the whole framebuffer, a frame of one
-/// VP9 stream ([`vp9`]). It wins over ZRLE wherever it is listed.
+/// The VP9 encoding, the ASCII bytes `WLSV`: a client that lists it, with a
+/// quality beside it ([`vp9::Vp9Stream`]), is sent every picture as one
+/// rectangle over the whole framebuffer, a frame of one VP9 stream ([`vp9`]).
+/// It wins over ZRLE wherever it is listed; listed without a quality it is
+/// fatal, since the server has none of its own.
 pub const ENCODING_VP9: i32 = 0x574c_5356;
 /// DesktopSize pseudo-encoding: a rectangle announcing the framebuffer's new size.
 pub const ENCODING_DESKTOP_SIZE: i32 = -223;
