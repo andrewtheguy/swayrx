@@ -5,7 +5,7 @@
 - Two crates: `wlshare-rfb` (protocol), platform-independent and tested by a
   bare `cargo test`, and `wlshare` (the daemon, Linux + wlroots-based Wayland
   only). Its one client is the remotex gateway; there is no native client. The
-  VP9 coding is not here: it is the `desktop-vp9` repository, shared
+  VP9 coding is not here: it is the `screen-vp9` repository, shared
   with the remotex gateway and pinned by release tag, and a libvpx setting or
   the quality walk changes there and arrives as a pin bump. After Rust
   changes run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
@@ -18,10 +18,10 @@
   `-sys` crates run — and `libavcodec-dev` for the camera's H.264 decoder, the
   system's libavcodec linked dynamically.
   The audio extension's FLAC coding is not here either: it is the
-  `desktop-flac` repository, shared with the remotex gateway and pinned by
+  `sound-flac` repository, shared with the remotex gateway and pinned by
   release tag the same way, with libFLAC linked from a prebuilt static archive:
   nothing is needed to build or to run.
-  Its Opus coding is the `desktop-opus` repository, shared and pinned the same
+  Its Opus coding is the `sound-opus` repository, shared and pinned the same
   way, with libopus linked from a prebuilt static archive too: nothing is needed
   to build or to run, and `ffmpeg` on the path to run the protocol crate's Opus
   tests, which decode with it.

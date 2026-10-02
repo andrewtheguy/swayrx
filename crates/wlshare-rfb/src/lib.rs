@@ -10,7 +10,7 @@
 //! machine, the daemon being buildable only where libwayland and libxkbcommon
 //! are. The audio extension's FLAC encoder is libFLAC and its Opus encoder
 //! libopus, each from a prebuilt static archive, as libvpx is under
-//! `desktop-vp9`, so the crate builds and runs with neither installed.
+//! `screen-vp9`, so the crate builds and runs with neither installed.
 //! Tests here use an independent decoder for
 //! every encoder, so the two halves cannot share a misunderstanding.
 //!

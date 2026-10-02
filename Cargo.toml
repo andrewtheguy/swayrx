@@ -1,6 +1,6 @@
 # The daemon and the protocol crate it is built on (see docs/architecture.md).
-# The VP9 coding under both is desktop-vp9, the FLAC coding desktop-flac and the
-# Opus coding desktop-opus, each its own repository.
+# The VP9 coding under both is screen-vp9, the FLAC coding sound-flac and the
+# Opus coding sound-opus, each its own repository.
 #
 # `default-members` deliberately omits the daemon: it needs libwayland and
 # libxkbcommon and only runs against a Wayland compositor, so a bare

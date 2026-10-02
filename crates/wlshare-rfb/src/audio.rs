@@ -56,11 +56,11 @@
 //! has to lose sound loses it before the encoder. The format's frequency
 //! must be one Opus codes at ([`OPUS_FREQUENCIES`]); its sample format says
 //! only what the capture hands the encoder, since what an Opus decoder gives
-//! back is its own business. The coding is `desktop-opus`'s, the one place a
+//! back is its own business. The coding is `sound-opus`'s, the one place a
 //! desktop's sound is made Opus for wlshare and the gateway alike, with libopus
 //! linked statically under it.
 
-use desktop_flac::{Encoder, Stream};
+use sound_flac::{Encoder, Stream};
 use thiserror::Error;
 
 /// The message type the client's messages and the server's begin and end use,
@@ -105,17 +105,17 @@ pub const CLIENT_AUDIO_BITRATE_LEN: usize = 8;
 
 /// The rates Opus codes at, in Hz: the only frequencies a format coded as Opus
 /// may have.
-pub use desktop_opus::RATES as OPUS_FREQUENCIES;
+pub use sound_opus::RATES as OPUS_FREQUENCIES;
 /// The Opus rate, in bits per second, of a stream whose client named none.
-pub use desktop_opus::BITRATE_DEFAULT as OPUS_BITRATE_DEFAULT;
+pub use sound_opus::BITRATE_DEFAULT as OPUS_BITRATE_DEFAULT;
 /// The lowest and highest Opus rates a client may ask for, in bits per second.
-pub use desktop_opus::{BITRATE_MAX as OPUS_BITRATE_MAX, BITRATE_MIN as OPUS_BITRATE_MIN};
+pub use sound_opus::{BITRATE_MAX as OPUS_BITRATE_MAX, BITRATE_MIN as OPUS_BITRATE_MIN};
 /// The most bytes one Opus packet is.
-pub use desktop_opus::MAX_PACKET as OPUS_MAX_PACKET;
+pub use sound_opus::MAX_PACKET as OPUS_MAX_PACKET;
 /// The samples, at 48 kHz, a decoder is to discard from the start of an Opus
 /// stream, which the `OpusHead` a client builds states as its pre-skip: nothing
 /// of that header is sent.
-pub use desktop_opus::PRE_SKIP as OPUS_PRE_SKIP;
+pub use sound_opus::PRE_SKIP as OPUS_PRE_SKIP;
 
 /// The lowest sampling frequency a client may ask for.
 ///
@@ -332,10 +332,10 @@ pub enum AudioEncodeError {
     /// The format's frequency is not one Opus codes at, or libopus refused
     /// the stream, a rate or a block of it.
     #[error(transparent)]
-    Opus(#[from] desktop_opus::Error),
+    Opus(#[from] sound_opus::Error),
     /// libFLAC refused the stream or a block of it.
     #[error(transparent)]
-    Flac(#[from] desktop_flac::Error),
+    Flac(#[from] sound_flac::Error),
 }
 
 /// A frame message with nothing in it yet: the header, its length to be
@@ -379,7 +379,7 @@ impl Pending {
 /// next buffer. What is left when the stream stops is under twenty
 /// milliseconds, and goes with it.
 ///
-/// A frame is made the moment its last sample arrives, by `desktop-flac`'s
+/// A frame is made the moment its last sample arrives, by `sound-flac`'s
 /// encoder, as a FLAC stream of its own, so every frame is numbered zero.
 ///
 /// | Offset | Type | Field |
@@ -442,13 +442,13 @@ impl FlacEncoder {
 /// twenty milliseconds, as [`FlacEncoder`]'s are and with the same message
 /// around it.
 ///
-/// The packets are `desktop-opus`'s, which the remotex gateway codes the sound
+/// The packets are `sound-opus`'s, which the remotex gateway codes the sound
 /// of a desktop it encodes itself with, so a passed stream and one made there
 /// are the same. No header goes with them: a client builds `OpusHead` from the
 /// format it set and [`OPUS_PRE_SKIP`].
 pub struct OpusEncoder {
     format: AudioFormat,
-    codec: desktop_opus::Encoder,
+    codec: sound_opus::Encoder,
     /// Samples not yet a whole packet's worth, as the capture gave them.
     pending: Pending,
     /// One block as the encoder takes it, signed 16-bit, reused.
@@ -461,7 +461,7 @@ impl OpusEncoder {
     pub fn new(format: AudioFormat, bitrate: u32) -> Result<Self, AudioEncodeError> {
         format.check()?;
         check_bitrate(bitrate)?;
-        let codec = desktop_opus::Encoder::new(desktop_opus::Stream { rate: format.frequency, channels: format.channels }, bitrate)?;
+        let codec = sound_opus::Encoder::new(sound_opus::Stream { rate: format.frequency, channels: format.channels }, bitrate)?;
         Ok(Self { format, codec, pending: Pending::default(), samples: Vec::new() })
     }
 
@@ -1035,7 +1035,7 @@ mod tests {
         let good = AudioFormat { sample: SampleFormat::S16, channels: 2, frequency: 48_000 };
         for frequency in [44_100, 11_025, MAX_FREQUENCY] {
             let format = AudioFormat { frequency, ..good };
-            assert!(matches!(OpusEncoder::new(format, OPUS_BITRATE_DEFAULT), Err(AudioEncodeError::Opus(desktop_opus::Error::Unsupported(_)))));
+            assert!(matches!(OpusEncoder::new(format, OPUS_BITRATE_DEFAULT), Err(AudioEncodeError::Opus(sound_opus::Error::Unsupported(_)))));
             assert!(matches!(AudioEncoder::new(Codec::Opus, format, OPUS_BITRATE_DEFAULT), Err(AudioEncodeError::Opus(_))));
             assert!(AudioEncoder::new(Codec::Flac, format, OPUS_BITRATE_DEFAULT).is_ok());
         }
@@ -1084,7 +1084,7 @@ mod tests {
     fn the_pre_skip_is_the_encoders_lookahead() {
         assert_eq!(OPUS_PRE_SKIP, 312);
         for rate in OPUS_FREQUENCIES {
-            let mut encoder = desktop_opus::Encoder::new(desktop_opus::Stream { rate, channels: 2 }, OPUS_BITRATE_DEFAULT).unwrap();
+            let mut encoder = sound_opus::Encoder::new(sound_opus::Stream { rate, channels: 2 }, OPUS_BITRATE_DEFAULT).unwrap();
             assert_eq!(encoder.pre_skip().unwrap(), OPUS_PRE_SKIP);
         }
     }

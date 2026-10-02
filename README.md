@@ -120,9 +120,9 @@ read their packets back with — and
 `wlshare`, the daemon, which needs libwayland,
 libxkbcommon, libpipewire and libavcodec and only runs under a wlroots-based
 Wayland compositor. The VP9 coding under them is
-[desktop-vp9](https://github.com/andrewtheguy/desktop-vp9), the FLAC coding
-[desktop-flac](https://github.com/andrewtheguy/desktop-flac) and the Opus coding
-[desktop-opus](https://github.com/andrewtheguy/desktop-opus), each shared with
+[screen-vp9](https://github.com/andrewtheguy/screen-vp9), the FLAC coding
+[sound-flac](https://github.com/andrewtheguy/sound-flac) and the Opus coding
+[sound-opus](https://github.com/andrewtheguy/sound-opus), each shared with
 the remotex gateway and pinned by its release tag. A bare `cargo test` covers the
 first; build the daemon with
 `cargo build --release -p wlshare` on a Linux host with `libwayland-dev`,
