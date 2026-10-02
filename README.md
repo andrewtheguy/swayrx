@@ -60,6 +60,12 @@ Windows Remote Desktop does, and the RFB shared flag changes nothing. See
 [`docs/architecture.md`](docs/architecture.md) for how it works and what it
 deliberately leaves out.
 
+There is no backward compatibility between releases, and no legacy path is kept
+for one. A release may change or remove a configuration key, a private RFB
+extension's wire format or a feature, with nothing that reads the old form:
+check [`packaging/config.example.toml`](packaging/config.example.toml) against
+your config when you upgrade, and upgrade the remotex gateway along with it.
+
 ## Running
 
 wlshare runs inside the Wayland session it captures, as the user who owns it:
