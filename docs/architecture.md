@@ -373,13 +373,23 @@ is held past 500 ms — remotex's `FENCE_HOLD_LIMIT`, its paint window's grace.
 
 Standard RFB has no word for pixel density. The extension is one pseudo-encoding,
 `0x574c5348` (`WLSH`), and one message type, `0xE0`, in both directions; scales
-are 16.16 unsigned fixed point.
+are 16.16 unsigned fixed point, so `0x0002_0000` is 2.0 and `0x0001_8000` is 1.5.
+Both messages have one layout:
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U8 | message type, `0xE0` |
+| 1 | U8 | padding |
+| 2 | U16 | width, pixels |
+| 4 | U16 | height, pixels |
+| 6 | U32 | scale, 16.16 fixed |
 
 - **OutputScale**, server → client, ten bytes: type, padding, width and height
   in pixels, scale. Sent as the answer to *every* `SetEncodings` that lists the
   pseudo-encoding — the only way support is announced — and whenever the shared
-  output's scale or mode changes, before the frame at the new size is captured,
-  so the report precedes the resize rectangle.
+  output's scale or mode changes or another output becomes the shared one, before
+  the frame at the new size is captured, so the report precedes the resize
+  rectangle.
 - **ClientDensity**, client → server, ten bytes in OutputScale's layout: type,
   padding, width and height in pixels, scale. The client states the scale it
   wants the output drawn at *and* the size it wants at that scale, every time,
@@ -422,13 +432,42 @@ and one message type, `0xE1`, in both directions.
   lists the pseudo-encoding — the only way support is announced — and again
   whenever the list, an entry, or the shared output changes. Entries are ordered
   by name, and an output whose name or mode has not arrived yet is not in them.
-  The id is the `wl_output` global, unique for as long as the output exists.
+  The id is the `wl_output` global, unique for as long as the output exists and
+  opaque to the client. The name is the compositor's own, `DP-2` or
+  `HEADLESS-1`, and the headless flag marks an output the compositor made rather
+  than a monitor somebody is sitting at.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U8 | message type, `0xE1` |
+| 1 | U8 | padding |
+| 2 | U16 | count |
+| 4 | U32 | the shared output's id |
+
+  then `count` entries:
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U32 | id |
+| 4 | U16 | width, pixels |
+| 6 | U16 | height, pixels |
+| 8 | U32 | scale, 16.16 fixed |
+| 12 | U8 | flags — bit 0: headless |
+| 13 | U8 | name length |
+| 14 | U8[] | name, UTF-8 |
+
 - **SelectOutput**, client → server, eight bytes: type, three bytes of padding,
   the id of the output to share. Honoured only from a client that listed the
   pseudo-encoding and holds the desktop, and **answered with an OutputList**
   either way: a request naming an output the compositor no longer has, or the one
   already shared, is answered with the list as it is. So a client's menu follows
   what is on the canvas rather than what was clicked.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U8 | message type, `0xE1` |
+| 1 | U8[3] | padding |
+| 4 | U32 | id |
 
 A switch stops the capture, points the virtual pointer at the new output —
 `zwlr_virtual_pointer` takes its output when it is made and never again, so what
@@ -478,13 +517,33 @@ lists only `-259`, gtk-vnc for one, hears nothing.
 - **The announcement**, server → client: an empty pseudo-rectangle of encoding
   `WLSF` in a `FramebufferUpdate` of its own, sent ahead of any pixels to a
   client whose `SetEncodings` listed it. The only way support is announced.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U16 | x, 0 |
+| 2 | U16 | y, 0 |
+| 4 | U16 | width, 0 |
+| 6 | U16 | height, 0 |
+| 8 | S32 | encoding, `0x574c5346` |
+
 - **Set format, enable, disable**, client → server, QEMU's messages: the sample
   format, channel count and frequency are the client's to choose, and the
   server converts what the desktop plays into them. The formats are QEMU's
   codes 0–3, U8, S8, U16 and S16; its 32-bit codes are refused, because FLAC
   stores at most 24 bits. The frequency is bounded at 8 kHz, the lowest rate
   real audio uses, and at 96 kHz, twice what the desktop's own graph runs at.
-  A code or rate outside those is fatal.
+  A code or rate outside those is fatal. Four bytes for an enable or a disable,
+  ten for a set-format:
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U8 | `255` |
+| 1 | U8 | `1` |
+| 2 | U16 | operation: 0 enable, 1 disable, 2 set format |
+| 4 | U8 | sample format (set format only): 0 U8, 1 S8, 2 U16, 3 S16 |
+| 5 | U8 | channels, 1 or 2 |
+| 6 | U32 | frequency |
+
 - **Opus**, client → server: the pseudo-encoding `WLOP`, listed beside `WLSF`,
   asks for the sound as Opus in place of FLAC. A pseudo-encoding rather than a
   message, as the VP9 stream's choices are, so it rides the list that asks for
@@ -503,7 +562,14 @@ lists only `-259`, gtk-vnc for one, hears nothing.
 | 2 | U16 | operation, `3` |
 | 4 | U32 | bits per second |
 
-- **Begin and end**, server → client, QEMU's messages.
+- **Begin and end**, server → client, QEMU's messages:
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | U8 | `255` |
+| 1 | U8 | `1` |
+| 2 | U16 | operation: 0 end, 1 begin |
+
 - **A frame**, server → client, between a begin and an end — one FLAC frame, or
   one Opus packet:
 
@@ -599,7 +665,8 @@ audio graph and give every application on the host an xrun. Encoding there
 keeps it off the session's task, which has pixels to compress; a 20 ms buffer
 takes a fraction of a millisecond. The encoder keeps what does not fill a frame
 for the next buffer — PipeWire honours its own quantum before settling on the
-requested one, so the first buffers of a session are often shorter than 20 ms —
+requested one, so the first buffers of a session are often shorter than 20 ms,
+512 frames where 960 were asked for —
 and queues each frame it completes in a sixteen-deep queue. When a client cannot
 keep up, FLAC drops the oldest: each frame decodes on its own, so a dropped one
 is a 20 ms hole, and a stalled capture callback is worse. Opus leaves a buffer
