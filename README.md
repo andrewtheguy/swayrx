@@ -115,9 +115,8 @@ the server resolves the client's keysyms through the same keymap it uploads.
 ## Building
 
 The workspace has two crates: `wlshare-rfb`, the protocol, which builds
-anywhere and tests wherever libFLAC and `ffmpeg` are installed — the audio
-extension's FLAC encoder, loaded at run time and never linked, Debian's
-`libflac14`, and the decoder its Opus tests read their packets back with — and
+anywhere and tests wherever `ffmpeg` is installed — the decoder its Opus tests
+read their packets back with — and
 `wlshare`, the daemon, which needs libwayland,
 libxkbcommon, libpipewire and libavcodec and only runs under a wlroots-based
 Wayland compositor. The VP9 coding under them is
@@ -139,8 +138,7 @@ release `v<version>`, the version being the workspace's in `Cargo.toml`; bump it
 before running the workflow. The package version is the crate's, and the
 distribution is in the file name only. The package depends on
 `libwlroots-0.19 (>= 0.19.0)`, the first wlroots that keeps the cursor out of a
-headless capture, on `libflac14`, the FLAC encoder the daemon loads when a
-client enables audio as FLAC — the Opus encoder is linked in — and on `pipewire`, `wireplumber` and `pipewire-pulse`: the
+headless capture, and on `pipewire`, `wireplumber` and `pipewire-pulse`: the
 PipeWire server the speaker, the camera and the microphone live in, the session
 manager that makes the speaker the default and links streams to it, and the
 PulseAudio server most applications play through. Without them the desktop's

@@ -19,12 +19,11 @@
   system's libavcodec linked dynamically.
   The audio extension's FLAC coding is not here either: it is the
   `desktop-flac` repository, shared with the remotex gateway and pinned by
-  release tag the same way. It loads the system's libFLAC at run time and never
-  links it: nothing is needed to build, and `libflac14` to run the protocol
-  crate's audio tests or the daemon's audio.
+  release tag the same way, with libFLAC linked from a prebuilt static archive:
+  nothing is needed to build or to run.
   Its Opus coding is the `desktop-opus` repository, shared and pinned the same
-  way, with libopus linked from a prebuilt static archive: nothing is needed to
-  build or to run, and `ffmpeg` on the path to run the protocol crate's Opus
+  way, with libopus linked from a prebuilt static archive too: nothing is needed
+  to build or to run, and `ffmpeg` on the path to run the protocol crate's Opus
   tests, which decode with it.
 - Every protocol byte comes from `wlshare-rfb`; the daemon writes none itself.
   Every encoder gets an independent decoder in its tests.

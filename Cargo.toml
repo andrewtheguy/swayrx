@@ -5,8 +5,7 @@
 # `default-members` deliberately omits the daemon: it needs libwayland and
 # libxkbcommon and only runs against a Wayland compositor, so a bare
 # `cargo test` on a development machine of any OS exercises the protocol crate
-# and nothing else, its audio tests with the libFLAC and the ffmpeg that machine
-# has installed.
+# and nothing else, its Opus tests with the ffmpeg that machine has installed.
 # Build the daemon explicitly with `-p wlshare`.
 [workspace]
 members = ["crates/wlshare-rfb", "crates/wlshare"]
@@ -14,7 +13,7 @@ default-members = ["crates/wlshare-rfb"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.49"
+version = "0.0.50"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/andrewtheguy/wlshare"

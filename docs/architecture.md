@@ -26,8 +26,8 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
   density, outputs, audio, camera and microphone extensions and the scroll
   message. It has no platform
   dependency — the audio extension's FLAC encoder, libFLAC under `desktop-flac`,
-  is loaded at run time and not linked, and its Opus encoder, libopus under
-  `desktop-opus`, is a prebuilt static archive — and its tests decode every encoder's output with an
+  and its Opus encoder, libopus under `desktop-opus`, are prebuilt static
+  archives — and its tests decode every encoder's output with an
   independent decoder, read every server message back with a client's parser,
   and run the RSA-AES exchange against a client written from the specification.
 - `crates/wlshare` is the daemon. `compositor.rs` is the Wayland thread and its
@@ -534,13 +534,10 @@ bytes before compression.
 The encoder is libFLAC, the reference one, spoken to in one place:
 [desktop-flac](https://github.com/andrewtheguy/desktop-flac), a repository of
 its own that this workspace and the remotex gateway, whose decoder it also is,
-each pin by release tag. It loads the system's shared library the first time a
-stream is set up — FLAC 1.5's `libFLAC.so.14`, or 1.4's `libFLAC.so.12` on a
-system that has that one — so nothing of FLAC is compiled or linked. A load at
-run time is one `dpkg-shlibdeps` cannot see, so the package
-names `libflac14`, trixie's, in its dependencies itself. Without the library an
-enable is refused, with a log line saying what to install, and no begin is
-sent. libFLAC encodes a stream and holds each block back until it has a sample
+each pin by release tag. It links FLAC 1.5 from a prebuilt static archive
+([libflac-prebuilt](https://github.com/andrewtheguy/libflac-prebuilt)), so no C
+is compiled, nothing is loaded at run time and the package depends on no
+libFLAC. libFLAC encodes a stream and holds each block back until it has a sample
 of the next, to know whether the block is the stream's last; sound heard as it
 is made cannot wait twenty milliseconds for that, so each frame is a stream of
 its own, one block long, started and finished around it, which is why every

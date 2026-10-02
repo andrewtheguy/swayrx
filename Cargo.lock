@@ -297,7 +297,7 @@ checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
 dependencies = [
  "glob",
  "libc",
- "libloading 0.8.9",
+ "libloading",
 ]
 
 [[package]]
@@ -509,10 +509,10 @@ dependencies = [
 
 [[package]]
 name = "desktop-flac"
-version = "0.0.2"
-source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.2#05960c018d49154fc67aff5a8872923a496ccec6"
+version = "0.0.3"
+source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.3#752f65c3ca4be067f29417b1bdd1a113e091845b"
 dependencies = [
- "libloading 0.9.0",
+ "libflac-prebuilt-sys",
  "thiserror",
 ]
 
@@ -769,20 +769,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libflac-prebuilt-sys"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/libflac-prebuilt?tag=v1.5.0-20261002034056-4ba69e8#4ba69e821e60fca68657abdb3968c21dab01e747"
+
+[[package]]
 name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",
@@ -1664,7 +1659,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "wlshare"
-version = "0.0.49"
+version = "0.0.50"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1693,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "wlshare-rfb"
-version = "0.0.49"
+version = "0.0.50"
 dependencies = [
  "aes",
  "desktop-flac",
