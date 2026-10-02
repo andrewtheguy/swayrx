@@ -692,7 +692,8 @@ impl Session {
                 if self.use_zrle && self.zrle.is_none() {
                     self.zrle = Some(ZrleEncoder::default());
                 }
-                let listed = Vp9Stream::listed(&encodings);
+                // Fatal without a quality: no client sends such a list.
+                let listed = Vp9Stream::listed(&encodings).context("reading the VP9 stream the client lists")?;
                 let vp9 = listed.is_some();
                 let changed = listed.is_some_and(|stream| stream != self.stream);
                 if let Some(stream) = listed.filter(|_| changed) {

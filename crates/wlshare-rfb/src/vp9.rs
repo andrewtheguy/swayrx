@@ -61,9 +61,10 @@ pub const ENCODING_VP9_HELD: i32 = 0x574c_5344;
 /// frame is already what was asked for. The remotex gateway lists them from the
 /// target's own keys, so that those keys mean on a passed stream what they mean
 /// on one the gateway codes itself. A list that names VP9 without a quality
-/// does not ask for VP9: the gateway always names one, and the server has no
-/// quality of its own. Without `WLS0` the stream is 4:4:4, and without `WLSD`
-/// it walks.
+/// is fatal ([`NoQuality`]): the server has no quality of its own, the gateway
+/// names one beside the encoding on every list, and a client that is not the
+/// gateway lists no VP9 at all. Without `WLS0` the stream is 4:4:4, and
+/// without `WLSD` it walks.
 ///
 /// A change of chroma starts the stream over at a keyframe; a change of quality
 /// or of the walk moves the running encoder's dial without one.
@@ -76,21 +77,23 @@ pub struct Vp9Stream {
 
 impl Vp9Stream {
     /// The stream `encodings` asks for: `None` where the list does not name
-    /// [`crate::ENCODING_VP9`], or names no quality on the dial beside it.
-    pub fn listed(encodings: &[i32]) -> Option<Self> {
+    /// [`crate::ENCODING_VP9`], and [`NoQuality`] where it does and names no
+    /// quality on the dial beside it.
+    pub fn listed(encodings: &[i32]) -> Result<Option<Self>, NoQuality> {
         let has = |e: i32| encodings.contains(&e);
         if !has(crate::ENCODING_VP9) {
-            return None;
+            return Ok(None);
         }
         let quality = encodings
             .iter()
             .filter_map(|&e| u8::try_from(e.checked_sub(ENCODING_VP9_QUALITY_BASE)?).ok())
-            .find(|q| (QUALITY_MIN..=QUALITY_MAX).contains(q))?;
-        Some(Self {
+            .find(|q| (QUALITY_MIN..=QUALITY_MAX).contains(q))
+            .ok_or(NoQuality)?;
+        Ok(Some(Self {
             chroma: if has(ENCODING_VP9_SUBSAMPLED) { Chroma::Subsampled } else { Chroma::Full },
             quality,
             adaptive: !has(ENCODING_VP9_HELD),
-        })
+        }))
     }
 
     /// The list that asks for this stream: the encoding, the quality always,
@@ -107,6 +110,13 @@ impl Vp9Stream {
         listed
     }
 }
+
+/// A list that names VP9 and no quality on the dial beside it, which no client
+/// sends: the gateway names one on every list, and a client that is not the
+/// gateway lists no VP9. Fatal to the connection, as a malformed message is.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("the list names VP9 without a quality 1–100 beside it")]
+pub struct NoQuality;
 
 /// Why a picture could not be encoded, or in the tests a frame decoded.
 #[derive(Debug, Error)]
@@ -376,21 +386,23 @@ mod stream_tests {
         let asked = Vp9Stream { chroma: Chroma::Subsampled, quality: 60, adaptive: true };
         assert_eq!(asked.encodings(), [crate::ENCODING_VP9, 0x574c_513c, 0x574c_5330]);
         let listed = [crate::ENCODING_VP9, 0x574c_513c, 0x574c_5330, crate::ENCODING_ZRLE];
-        assert_eq!(Vp9Stream::listed(&listed), Some(asked));
+        assert_eq!(Vp9Stream::listed(&listed), Ok(Some(asked)));
         let held = Vp9Stream { chroma: Chroma::Full, quality: 100, adaptive: false };
         assert_eq!(held.encodings(), [crate::ENCODING_VP9, 0x574c_5164, 0x574c_5344]);
-        assert_eq!(Vp9Stream::listed(&held.encodings()), Some(held));
+        assert_eq!(Vp9Stream::listed(&held.encodings()), Ok(Some(held)));
     }
 
-    /// The server has no quality of its own: a list that names VP9 without
-    /// one asks for no VP9 stream, and neither does one without VP9.
+    /// A list without VP9 asks for no stream, whatever else it names; the
+    /// server has no quality of its own, so one that names VP9 without a
+    /// quality is no list a client sends.
     #[test]
-    fn a_list_without_a_quality_asks_for_no_stream() {
-        assert_eq!(Vp9Stream::listed(&[crate::ENCODING_VP9, crate::ENCODING_ZRLE]), None);
-        assert_eq!(Vp9Stream::listed(&[0x574c_513c, 0x574c_5330, crate::ENCODING_ZRLE]), None, "a quality without the encoding");
-        // A quality off the dial is some other encoding, not a request.
+    fn a_list_that_names_vp9_without_a_quality_is_fatal() {
+        assert_eq!(Vp9Stream::listed(&[crate::ENCODING_ZRLE]), Ok(None));
+        assert_eq!(Vp9Stream::listed(&[0x574c_513c, 0x574c_5330, crate::ENCODING_ZRLE]), Ok(None), "a quality without the encoding");
+        assert_eq!(Vp9Stream::listed(&[crate::ENCODING_VP9, crate::ENCODING_ZRLE]), Err(NoQuality));
+        // A quality off the dial is some other encoding, not a quality.
         for off in [ENCODING_VP9_QUALITY_BASE, ENCODING_VP9_QUALITY_BASE + 101, ENCODING_VP9_QUALITY_BASE + 255, ENCODING_VP9_QUALITY_BASE + 256] {
-            assert_eq!(Vp9Stream::listed(&[crate::ENCODING_VP9, off]), None, "{off:#x}");
+            assert_eq!(Vp9Stream::listed(&[crate::ENCODING_VP9, off]), Err(NoQuality), "{off:#x}");
         }
     }
 }

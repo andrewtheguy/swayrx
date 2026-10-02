@@ -304,9 +304,12 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   `SetEncodings`, and owed a frame whether or not the desktop changed: a new
   chroma starts the stream over at a keyframe, a new ceiling moves the running
   encoder's dial and sends the picture once at it, as a settle does, and a new
-  walk moves the dial alone. A list that names VP9 without a quality does
-  not ask for VP9: the gateway always names one, and wlshare has no quality of
-  its own. Without `WLS0` the stream is 4:4:4, and without `WLSD` it walks.
+  walk moves the dial alone. A list that names VP9 without a quality is
+  fatal, as a malformed message is: wlshare has no quality of its own, the
+  gateway names one beside the encoding on every list, and a client that is
+  not the gateway — a plain `vnc` target reads wlshare through the RFB
+  baseline — lists no VP9 at all. Without `WLS0` the stream is 4:4:4, and
+  without `WLSD` it walks.
   Screen-content tuning, libvpx's
   realtime speed 7, no lag, and threads with row and tile parallelism: the
   machine's cores less two, at most eight, for the encoder, since an encode
