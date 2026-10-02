@@ -36,13 +36,6 @@ pub struct Config {
     /// The most frames captured per second.
     #[serde(default = "default_max_fps")]
     pub max_fps: u32,
-    /// The finest quality, 1–100, of the VP9 encoding a client may ask for
-    /// instead of a standard pixel encoding ([`wlshare_rfb::vp9`]). A session
-    /// starts there and gives quality up while its client falls behind
-    /// (`screen_vp9::walk`), then frames, from a floor of the encoder's own; a
-    /// desktop that has gone quiet is sharpened back here.
-    #[serde(default = "default_vp9_quality")]
-    pub vp9_quality: u8,
     /// How many seconds a connection has to finish the handshake — the
     /// security exchange and the login — before it is dropped. A client that
     /// asks its user to confirm the server key and then type a password spends
@@ -134,12 +127,6 @@ fn default_max_fps() -> u32 {
     60
 }
 
-/// Fine, because wlshare is mostly used on a LAN, which has the room for it;
-/// the walk still gives it up on a link that does not.
-fn default_vp9_quality() -> u8 {
-    90
-}
-
 fn default_handshake_timeout_secs() -> u64 {
     120
 }
@@ -160,12 +147,6 @@ impl Config {
     /// can finish inside, and one answer to the question of who may connect.
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.max_fps > 0, "max_fps must be at least 1");
-        anyhow::ensure!(
-            (wlshare_rfb::vp9::QUALITY_MIN..=wlshare_rfb::vp9::QUALITY_MAX).contains(&self.vp9_quality),
-            "vp9_quality must be from {} to {}",
-            wlshare_rfb::vp9::QUALITY_MIN,
-            wlshare_rfb::vp9::QUALITY_MAX
-        );
         anyhow::ensure!(self.handshake_timeout_secs > 0, "handshake_timeout_secs must be at least 1");
         anyhow::ensure!(
             !(self.pam.is_some() && self.password.is_some()),
@@ -206,7 +187,6 @@ mod tests {
         assert_eq!(c.listen, default_listen());
         assert!(c.resize);
         assert_eq!(c.max_fps, 60);
-        assert_eq!(c.vp9_quality, 90);
         assert_eq!(c.handshake_timeout_secs, 120);
         assert!(!c.audio);
         assert!(!c.camera);
@@ -252,23 +232,16 @@ mod tests {
         assert!(zero.validate().is_err());
     }
 
+    /// The VP9 keys are gone: the quality is the ceiling the client's list
+    /// names, and its one client always names one; the floor is the walk's
+    /// own, and the settle sharpens a quiet desktop at the ceiling, which is
+    /// what the floor was for. A file that still writes either is refused as
+    /// any unknown key is.
     #[test]
-    fn the_vp9_quality_is_on_the_dial() {
-        let c: Config = toml::from_str("vp9_quality = 100").unwrap();
-        c.validate().unwrap();
-        assert_eq!(c.vp9_quality, 100);
-        for off in ["vp9_quality = 0", "vp9_quality = 101"] {
-            let c: Config = toml::from_str(off).unwrap();
-            assert!(c.validate().is_err(), "{off}");
+    fn the_vp9_keys_are_no_longer_keys() {
+        for key in ["vp9_quality = 80", "vp9_quality_min = 45"] {
+            assert!(toml::from_str::<Config>(key).is_err(), "{key}");
         }
-    }
-
-    /// The floor key is gone: the settle sharpens a quiet desktop at the dial,
-    /// which is what the floor was for, and a file that still writes it is
-    /// refused as any unknown key is.
-    #[test]
-    fn a_vp9_floor_is_no_longer_a_key() {
-        assert!(toml::from_str::<Config>("vp9_quality = 80\nvp9_quality_min = 45").is_err());
     }
 
     #[test]

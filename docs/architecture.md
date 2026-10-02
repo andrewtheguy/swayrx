@@ -255,14 +255,14 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
 - **A quantizer and a frame rate that follow the link.** The 1–100 dial maps
   onto VP9's 8–63, finest last, as remotex's dial does; rate control is pinned
   to wherever the dial is, with no bitrate, no adaptive quantization and no
-  dropped frames. A session starts at `vp9_quality` (90 by default, for the
-  LAN wlshare mostly runs on), which is a ceiling it never goes above, and
+  dropped frames. A session starts at the ceiling the client's list names
+  (`WLQ`, below), which it never goes above, and
   walks down to a floor of 20 while the client is behind — the one walk both
   run, screen-vp9's `walk`. The floor is a constant, not a key, as
   every adaptive stream's is: where WebRTC's quality scaler hands off from the
   quantizer to resolution and frame rate at its own threshold, this walk hands
   off to the frame rate, and the settle below sharpens a quiet desktop back at
-  `vp9_quality`.
+  the ceiling.
   A frame's queueing is its fence's round trip — answered once the client has
   the frame, which for remotex means once the browser has taken it
   ([below](#the-clients-paint)) — less the shortest of the last
@@ -295,7 +295,7 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   they ride the list that names the encoding, so the first frame is already
   what was asked for. `WLS0` (`0x574c5330`) asks for 4:2:0 in place of 4:4:4;
   `0x574c5100` plus a quality 1–100 (`WLQ` and the value) names the ceiling the
-  walk never goes above, in place of `vp9_quality`; `WLSD` (`0x574c5344`)
+  walk never goes above; `WLSD` (`0x574c5344`)
   holds the dial there, with a walk that hears nothing in a fence — only a
   frame whose write blocked moves it, fence or no fence — and a settle with
   nothing to sharpen. The gateway lists them from the target's keys, so
@@ -304,8 +304,9 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   `SetEncodings`, and owed a frame whether or not the desktop changed: a new
   chroma starts the stream over at a keyframe, a new ceiling moves the running
   encoder's dial and sends the picture once at it, as a settle does, and a new
-  walk moves the dial alone. A list that names none of them is 4:4:4 at
-  `vp9_quality` with the walk.
+  walk moves the dial alone. A list that names VP9 without a quality does
+  not ask for VP9: the gateway always names one, and wlshare has no quality of
+  its own. Without `WLS0` the stream is 4:4:4, and without `WLSD` it walks.
   Screen-content tuning, libvpx's
   realtime speed 7, no lag, and threads with row and tile parallelism: the
   machine's cores less two, at most eight, for the encoder, since an encode
@@ -315,14 +316,14 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   between the framebuffer's pixels and the planes is the `yuv` crate's, on
   the AVX2 or NEON path the machine has: a scalar loop over a 4K frame was a
   fifth of an encode and a third of a decode.
-- **A quiet desktop is sharpened at `vp9_quality`, and the walk keeps its
+- **A quiet desktop is sharpened at the ceiling, and the walk keeps its
   place.** The walk only runs when a frame goes out. Ordinarily a frame only
   goes out when something changed, so a desktop that stops right after the link
   coarsened it would keep that picture until it changed again. Once a frame
-  encoded below `vp9_quality` has been delivered — its fence answered, or
+  encoded below the ceiling has been delivered — its fence answered, or
   without Fence its write finished — and nothing has been sent for 500 ms
   since, the unchanged picture goes out again, at the next update the client
-  asks for, as one inter frame at `vp9_quality`: libvpx codes the residual of
+  asks for, as one inter frame at the ceiling: libvpx codes the residual of
   unchanged blocks at the finer quantizer, so it sharpens the whole desktop
   without a keyframe
   (`a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe`
@@ -333,7 +334,7 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   every one. The clear frames before the quiet do not span it either: the
   walk's run of clear frames starts over at the settle, so a burst earns its
   step back up from its own frames rather than taking one on its first. A
-  frame that went out at `vp9_quality` owes nothing, and a desktop that goes
+  frame that went out at the ceiling owes nothing, and a desktop that goes
   quiet after one sends nothing. remotex's settle for its own whole-desktop
   streams.
 - **Keyframes only when a decoder needs one**: the first frame after the
@@ -624,8 +625,9 @@ that fell behind loses sound that was never coded instead.
 
 It is the choice of a client whose own listener takes Opus: the remotex gateway
 hands each packet to the browser as it came, where it would otherwise decode
-the FLAC and code Opus itself, and sends the rate its own walk of the browser's
-link arrives at as a set-bitrate. The encoder is libopus, spoken to in one
+the FLAC and code Opus itself, and sends the rate the walk of the browser's
+link arrives at as a set-bitrate: sound-opus's `walk`, the one rate walk
+there is, which the gateway runs for the sound it codes itself and for this. The encoder is libopus, spoken to in one
 place as libFLAC is: [sound-opus](https://github.com/andrewtheguy/sound-opus),
 which this workspace and the gateway, for the sound it codes itself, each pin
 by release tag, so a packet made here and one made there are the same stream —

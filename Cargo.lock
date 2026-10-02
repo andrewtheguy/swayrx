@@ -1287,8 +1287,8 @@ dependencies = [
 
 [[package]]
 name = "sound-opus"
-version = "0.0.2"
-source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.2#57147b529bd836abc2fca562c6936e5b74a71e7d"
+version = "0.0.3"
+source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.3#045d6eac8bb37868d53de9d17af323e7e2a5045f"
 dependencies = [
  "opus-prebuilt",
  "thiserror",
