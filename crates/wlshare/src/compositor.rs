@@ -367,6 +367,14 @@ impl Compositor {
                     input.pointer(buttons, x, y, extent);
                 }
             }
+            Command::Scroll { client, dx, dy } => {
+                if self.client != Some(client) {
+                    return;
+                }
+                if let Some(input) = &mut self.input {
+                    input.scroll(dx, dy);
+                }
+            }
             Command::Resize { client, width, height } => {
                 if self.client == Some(client) {
                     self.resize(client, width, height);

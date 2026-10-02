@@ -865,6 +865,7 @@ impl Session {
             }
             ClientMsg::KeyEvent { down, keysym } => self.shared.command(Command::Key { client: self.id, keysym, down }),
             ClientMsg::PointerEvent { buttons, x, y } => self.shared.command(Command::Pointer { client: self.id, buttons, x, y }),
+            ClientMsg::Scroll { dx, dy } => self.shared.command(Command::Scroll { client: self.id, dx, dy }),
             ClientMsg::CutText(_) => debug!("client {}: latin-1 cut text, which is not spoken here; ignored", self.id.0),
             ClientMsg::ExtendedCutText(body) => self.handle_clipboard(&body, writer).await?,
             ClientMsg::EnableContinuousUpdates { enable, .. } => {

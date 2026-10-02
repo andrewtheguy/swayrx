@@ -23,7 +23,8 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
 - `crates/wlshare-rfb` decides every byte on the wire: handshake, message parsing
   and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding's
   framing over `desktop-vp9`, the cursor and clipboard encodings, and the
-  density, outputs, audio, camera and microphone extensions. It has no platform
+  density, outputs, audio, camera and microphone extensions and the scroll
+  message. It has no platform
   dependency — the audio extension's FLAC encoder, libFLAC under `desktop-flac`,
   is loaded at run time and not linked, and its Opus encoder, libopus under
   `desktop-opus`, is a prebuilt static archive — and its tests decode every encoder's output with an
@@ -796,7 +797,17 @@ Keys and buttons are let go when the client leaves or is superseded, and a
 connection that never finished the handshake releases nothing. Pointer events
 arrive in framebuffer pixels and are injected as absolute positions against the
 framebuffer's extent, which the virtual pointer maps onto the shared output.
-Wheel "buttons" become discrete axis events.
+Wheel "buttons" become discrete axis events, a notch apiece.
+
+A notch is all RFB can say, so a touchpad glide or two fingers on a phone would
+scroll in lurches. A client that knows the server is wlshare sends a distance
+instead: the private message `0xE5`, six bytes — the type, a byte of padding,
+and the horizontal and vertical distance as S16 logical pixels of the output,
+positive rightward and downward — after the `PointerEvent` that says where. It
+has no pseudo-encoding, the server having no state to hold for it and nothing
+to answer. Logical pixels are the units an axis is in, so the distance is
+injected as it arrives, as a continuous axis: what a touchpad plugged into the
+machine sends, which an application spends as the distance it is.
 
 The clipboard is shared as UTF-8 text through Extended Clipboard, and only
 that way: latin-1 cut text is dropped in both directions, and a client that

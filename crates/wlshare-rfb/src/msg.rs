@@ -14,6 +14,7 @@ use crate::density::{CLIENT_DENSITY_LEN, MSG_DENSITY};
 use crate::microphone::{ClientMicrophone, MSG_MICROPHONE, MicrophoneParseError};
 use crate::outputs::{MSG_OUTPUTS, SELECT_OUTPUT_LEN};
 use crate::pixel::PixelFormat;
+use crate::scroll::{MSG_SCROLL, SCROLL_LEN};
 
 // ── Client message types ─────────────────────────────────────────────────────
 pub const CLIENT_SET_PIXEL_FORMAT: u8 = 0;
@@ -101,6 +102,10 @@ pub enum ClientMsg {
     /// The outputs extension's request: share the output with this id, as the
     /// last list named it ([`crate::outputs`]).
     SelectOutput { id: u32 },
+    /// The scroll message: scroll by this distance in the output's logical
+    /// pixels, positive rightward and downward, where the pointer is
+    /// ([`crate::scroll`]).
+    Scroll { dx: i16, dy: i16 },
     /// The QEMU Audio extension: start sending the desktop's sound.
     AudioEnable,
     /// The QEMU Audio extension: stop.
@@ -145,6 +150,10 @@ pub enum ParseError {
 
 fn u16_at(b: &[u8], i: usize) -> u16 {
     u16::from_be_bytes([b[i], b[i + 1]])
+}
+
+fn i16_at(b: &[u8], i: usize) -> i16 {
+    i16::from_be_bytes([b[i], b[i + 1]])
 }
 
 fn u32_at(b: &[u8], i: usize) -> u32 {
@@ -259,6 +268,10 @@ pub fn parse(buf: &[u8]) -> Result<Option<(ClientMsg, usize)>, ParseError> {
         MSG_OUTPUTS => {
             need!(SELECT_OUTPUT_LEN);
             (ClientMsg::SelectOutput { id: u32_at(buf, 4) }, SELECT_OUTPUT_LEN)
+        }
+        MSG_SCROLL => {
+            need!(SCROLL_LEN);
+            (ClientMsg::Scroll { dx: i16_at(buf, 2), dy: i16_at(buf, 4) }, SCROLL_LEN)
         }
         MSG_QEMU => match crate::audio::parse_client(buf)? {
             None => return Ok(None),
@@ -446,6 +459,10 @@ mod tests {
         assert_eq!(m, ClientMsg::SelectOutput { id: 7 });
         assert_eq!(n, 8);
         assert_eq!(parse(&[0xE1, 0, 0, 0, 0, 0, 0]).unwrap(), None, "a short SelectOutput asks for more");
+        let (m, n) = parse(&[0xE5, 0, 0xFF, 0xE0, 0x01, 0x00, 0xFF]).unwrap().unwrap();
+        assert_eq!(m, ClientMsg::Scroll { dx: -32, dy: 256 });
+        assert_eq!(n, 6);
+        assert_eq!(parse(&[0xE5, 0, 0xFF, 0xE0, 0x01]).unwrap(), None, "a short Scroll asks for more");
     }
 
     #[test]
