@@ -364,7 +364,25 @@ impl Input {
         self.pointer.frame();
     }
 
-    /// Let go of everything the client left held.
+    /// A Scroll: a distance in the output's logical pixels, the units an axis
+    /// is in, positive rightward and downward, where the pointer is. It goes to
+    /// the compositor as a continuous source: a distance the applications
+    /// spend as it is, the way they spend a touchpad's, rather than a count of
+    /// notches.
+    pub fn scroll(&mut self, dx: i16, dy: i16) {
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        let time = self.time();
+        self.pointer.axis_source(wl_pointer::AxisSource::Continuous);
+        for (axis, pixels) in [(wl_pointer::Axis::VerticalScroll, dy), (wl_pointer::Axis::HorizontalScroll, dx)] {
+            if pixels != 0 {
+                self.pointer.axis(time, axis, f64::from(pixels));
+            }
+        }
+        self.pointer.frame();
+    }
+
     /// Point the pointer at another output, for a client that asked for another
     /// screen: `zwlr_virtual_pointer` takes an output when it is made and never
     /// again, so the one bound to the old output is destroyed and a new one made
@@ -375,6 +393,7 @@ impl Input {
         self.pointer = pointers.create_virtual_pointer_with_output(Some(seat), Some(output), qh, ());
     }
 
+    /// Let go of everything the client left held.
     pub fn release_all(&mut self) {
         let sent = self.keys.release_all();
         self.send_keys(&sent);

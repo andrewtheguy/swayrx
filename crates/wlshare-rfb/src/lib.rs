@@ -56,6 +56,9 @@
 //!   which is how a client lends the desktop a microphone: the client plugs it,
 //!   and sends 16-bit PCM in the format the server names while the desktop's
 //!   applications record ([`microphone`]).
+//! - **The scroll message**, one private client message, which is how a client
+//!   scrolls by a distance in pixels where RFB's wheel buttons have only
+//!   notches ([`scroll`]).
 //! - **Extended Clipboard**, the registered one and the only clipboard spoken:
 //!   text as UTF-8, notified and then asked for ([`clipboard`]). Latin-1 cut
 //!   text is framed so that it can be skipped, and otherwise ignored.
@@ -77,6 +80,7 @@ pub mod msg;
 pub mod outputs;
 pub mod pixel;
 pub mod rsa_aes;
+pub mod scroll;
 pub mod vp9;
 pub mod zrle;
 

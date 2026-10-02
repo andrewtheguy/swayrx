@@ -34,6 +34,8 @@ pub enum Command {
     ClientLeft(ClientId),
     Key { client: ClientId, keysym: u32, down: bool },
     Pointer { client: ClientId, buttons: u8, x: u16, y: u16 },
+    /// Scroll: the client scrolls by this distance in logical pixels.
+    Scroll { client: ClientId, dx: i16, dy: i16 },
     /// SetDesktopSize: the client wants the desktop `width`×`height` pixels.
     Resize { client: ClientId, width: u16, height: u16 },
     /// ClientDensity: the client wants the output `width`×`height` pixels drawn

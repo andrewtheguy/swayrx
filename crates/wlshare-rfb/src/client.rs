@@ -195,6 +195,15 @@ pub fn set_desktop_size(width: u16, height: u16) -> Vec<u8> {
     msg
 }
 
+/// The scroll message: a distance in logical pixels ([`crate::scroll`]).
+pub fn scroll(dx: i16, dy: i16) -> [u8; crate::scroll::SCROLL_LEN] {
+    let mut msg = [0u8; crate::scroll::SCROLL_LEN];
+    msg[0] = crate::scroll::MSG_SCROLL;
+    msg[2..4].copy_from_slice(&dx.to_be_bytes());
+    msg[4..6].copy_from_slice(&dy.to_be_bytes());
+    msg
+}
+
 /// ClientCutText carrying an Extended Clipboard body ([`crate::clipboard`]):
 /// the length is the body's, negated.
 pub fn client_extended_cut_text(body: &[u8]) -> Vec<u8> {
@@ -540,6 +549,7 @@ mod tests {
         assert_eq!(parsed(&key_event(true, 0xFFEB)), ClientMsg::KeyEvent { down: true, keysym: 0xFFEB });
         assert_eq!(parsed(&key_event(false, 0x0100_20AC)), ClientMsg::KeyEvent { down: false, keysym: 0x0100_20AC });
         assert_eq!(parsed(&pointer_event(0b101, 300, 20)), ClientMsg::PointerEvent { buttons: 5, x: 300, y: 20 });
+        assert_eq!(parsed(&scroll(48, -700)), ClientMsg::Scroll { dx: 48, dy: -700 });
         assert_eq!(parsed(&fence(msg::FENCE_BLOCK_BEFORE, &[0, 0, 0, 9])), ClientMsg::Fence { flags: 1, payload: vec![0, 0, 0, 9] });
         assert_eq!(
             parsed(&set_desktop_size(3456, 1802)),
