@@ -8,10 +8,9 @@
 //!
 //! The crate is platform-independent so that all of it is unit-tested on any
 //! machine, the daemon being buildable only where libwayland and libxkbcommon
-//! are. The audio extension's FLAC encoder is the system's libFLAC, which
-//! `desktop-flac` loads at run time rather than links, so the crate builds
-//! without it and only the FLAC tests need it installed; its Opus encoder is
-//! libopus from a prebuilt static archive, as libvpx is under `desktop-vp9`.
+//! are. The audio extension's FLAC encoder is libFLAC and its Opus encoder
+//! libopus, each from a prebuilt static archive, as libvpx is under
+//! `desktop-vp9`, so the crate builds and runs with neither installed.
 //! Tests here use an independent decoder for
 //! every encoder, so the two halves cannot share a misunderstanding.
 //!

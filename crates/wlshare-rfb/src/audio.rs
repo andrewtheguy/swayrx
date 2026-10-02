@@ -333,8 +333,7 @@ pub enum AudioEncodeError {
     /// the stream, a rate or a block of it.
     #[error(transparent)]
     Opus(#[from] desktop_opus::Error),
-    /// libFLAC is not on this system, or it refused the stream or a block of
-    /// it.
+    /// libFLAC refused the stream or a block of it.
     #[error(transparent)]
     Flac(#[from] desktop_flac::Error),
 }
@@ -399,8 +398,7 @@ pub struct FlacEncoder {
 }
 
 impl FlacEncoder {
-    /// An encoder for `format`, if it is one the extension carries and libFLAC
-    /// is on this system to encode it.
+    /// An encoder for `format`, if it is one the extension carries.
     pub fn new(format: AudioFormat) -> Result<Self, AudioEncodeError> {
         format.check()?;
         let codec = Encoder::new(Stream {

@@ -29,9 +29,9 @@ sha1 = "0.11"
 sha2 = "0.11"
 # The audio extension's FLAC frames: the one place libFLAC is spoken to, for
 # this workspace and for the remotex gateway, each pinned to its release tag. It
-# loads the system's shared library at run time, so nothing of FLAC is compiled
-# or linked.
-desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.2" }
+# links libFLAC from a prebuilt static archive its sys crate downloads, so no C
+# is compiled and nothing is looked for at run time.
+desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.3" }
 # The audio extension's Opus packets, for a client that asks for them in place
 # of FLAC: the one place a desktop's sound is coded as Opus, for this workspace
 # and for the remotex gateway, each pinned to its release tag. libopus is linked
