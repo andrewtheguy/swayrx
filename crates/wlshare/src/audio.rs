@@ -131,16 +131,17 @@ impl Queue {
 
 impl Capture {
     /// Open a capture in `format` for `client`, coded as `codec`, Opus at
-    /// `bitrate` bits per second. Blocks until PipeWire has taken the stream or
+    /// `bitrate` bits per second, which an Opus stream has to have been set
+    /// and FLAC has no use for. Blocks until PipeWire has taken the stream or
     /// refused it, so it belongs on a blocking thread.
-    pub fn start(client: ClientId, codec: Codec, format: AudioFormat, bitrate: u32) -> anyhow::Result<Self> {
+    pub fn start(client: ClientId, codec: Codec, format: AudioFormat, bitrate: Option<u32>) -> anyhow::Result<Self> {
         let speaker = Lease::take()?;
         let encoder = AudioEncoder::new(codec, format, bitrate).with_context(|| format!("setting up the {codec:?} encoder"))?;
         let queue = Arc::new(Queue {
             buffers: Mutex::new(VecDeque::with_capacity(QUEUE_DEPTH)),
             ready: Notify::new(),
             dropped: AtomicU64::new(0),
-            bitrate: AtomicU32::new(bitrate),
+            bitrate: AtomicU32::new(bitrate.unwrap_or(0)),
         });
         let (quit, quit_rx) = pw::channel::channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();

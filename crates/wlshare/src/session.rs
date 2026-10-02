@@ -126,7 +126,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use log::{debug, info, warn};
-use wlshare_rfb::audio::{AudioFormat, Codec, OPUS_BITRATE_DEFAULT, audio_begin, audio_end, audio_rect};
+use wlshare_rfb::audio::{AudioFormat, Codec, audio_begin, audio_end, audio_rect};
 use wlshare_rfb::camera::{CameraFormat, camera_available, camera_keyframe, camera_start, camera_stop};
 use wlshare_rfb::clipboard::{self, Caps, Message as ClipboardMessage};
 use wlshare_rfb::cursor::{alpha_cursor_rect, cursor_rect};
@@ -183,12 +183,16 @@ impl Security {
     }
 }
 
+/// The stream before the client has listed one, which no frame is coded
+/// from: a list that asks for VP9 names the stream it asks for, and a client
+/// that has seen nothing of a stream starts it at a keyframe whatever this
+/// held.
+const UNLISTED: Vp9Stream = Vp9Stream { chroma: Chroma::Full, quality: wlshare_rfb::vp9::QUALITY_MAX, adaptive: true };
+
 pub struct SessionConfig {
     pub security: Security,
     pub name: String,
     pub resize: bool,
-    /// The VP9 encoding's finest quality, 1–100, where a session starts.
-    pub vp9_quality: u8,
     /// The interval the capture is paced to, one over `max_fps`: what a
     /// slowed link's frames are spaced from ([`QualityWalk::interval`]).
     pub capture: Duration,
@@ -254,7 +258,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
 
     let events = shared.events.subscribe();
     let frames = shared.frame_tx.subscribe();
-    let stream = Vp9Stream { chroma: Chroma::Full, quality: config.vp9_quality, adaptive: true };
+    let stream = UNLISTED;
     let walk = QualityWalk::new(stream.quality, config.capture, stream.adaptive);
     let mut session = Session {
         id,
@@ -285,7 +289,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
         announce_audio: false,
         audio_format: AudioFormat::DEFAULT,
         audio_codec: Codec::Flac,
-        audio_bitrate: OPUS_BITRATE_DEFAULT,
+        audio_bitrate: None,
         audio: None,
         camera_supported: false,
         camera: None,
@@ -452,9 +456,9 @@ struct Session {
     audio_format: AudioFormat,
     /// What the sound is coded as, which the client's list says ([`Codec`]).
     audio_codec: Codec,
-    /// The rate the client set for Opus, in bits per second, or the
-    /// extension's default.
-    audio_bitrate: u32,
+    /// The rate the client set for Opus, in bits per second; `None` until it
+    /// has, and an Opus stream is not started without one.
+    audio_bitrate: Option<u32>,
     /// The capture, while the client has audio enabled.
     audio: Option<Capture>,
     /// The client listed the camera pseudo-encoding and the configuration
@@ -688,10 +692,11 @@ impl Session {
                 if self.use_zrle && self.zrle.is_none() {
                     self.zrle = Some(ZrleEncoder::default());
                 }
-                let vp9 = has(ENCODING_VP9);
-                let stream = Vp9Stream::listed(&encodings, self.config.vp9_quality);
-                let changed = stream != self.stream;
-                if changed {
+                // Fatal without a quality: no client sends such a list.
+                let listed = Vp9Stream::listed(&encodings).context("reading the VP9 stream the client lists")?;
+                let vp9 = listed.is_some();
+                let changed = listed.is_some_and(|stream| stream != self.stream);
+                if let Some(stream) = listed.filter(|_| changed) {
                     // A new ceiling or walk is a fresh walk from the ceiling, which
                     // a running encoder follows without a keyframe; a new chroma
                     // is a new stream, which starts at one. Either is owed the
@@ -716,6 +721,7 @@ impl Session {
                     }
                 }
                 if vp9 && (changed || !self.use_vp9) {
+                    let stream = self.stream;
                     info!(
                         "client {}: asked for VP9, {} up to quality {}, {}",
                         self.id.0,
@@ -980,7 +986,7 @@ impl Session {
                     return Ok(());
                 }
                 debug!("client {}: wants Opus at {bitrate} bit/s", self.id.0);
-                self.audio_bitrate = bitrate;
+                self.audio_bitrate = Some(bitrate);
                 // A running stream moves to it with no restart: every Opus
                 // packet states its own coding.
                 if let Some(capture) = &self.audio {

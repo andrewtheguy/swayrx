@@ -1287,8 +1287,8 @@ dependencies = [
 
 [[package]]
 name = "sound-opus"
-version = "0.0.2"
-source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.2#57147b529bd836abc2fca562c6936e5b74a71e7d"
+version = "0.0.4"
+source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.4#a7d8ec96b841c6fe5983eede045bddbe19b2928c"
 dependencies = [
  "opus-prebuilt",
  "thiserror",
@@ -1659,7 +1659,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "wlshare"
-version = "0.0.52"
+version = "0.0.53"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "wlshare-rfb"
-version = "0.0.52"
+version = "0.0.53"
 dependencies = [
  "aes",
  "eax",
