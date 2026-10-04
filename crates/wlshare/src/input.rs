@@ -80,7 +80,8 @@ fn is_character(keysym: u32) -> bool {
 /// releases have arrived, so a press of a key already down -- a held Control
 /// auto-repeating in the browser -- would leave the modifier depressed after the
 /// one release that follows, and every later key would be typed under it. Only
-/// a keycode going down or coming up reaches the state.
+/// a keycode going down or coming up reaches the state, and only that reaches
+/// the compositor: see [`Keys::send_key`].
 struct Modifiers {
     state: xkb::State,
     /// The keycodes the compositor has been told are down.
@@ -92,11 +93,14 @@ impl Modifiers {
         Self { state: xkb::State::new(keymap), down: HashSet::new() }
     }
 
-    fn key(&mut self, code: u32, down: bool) {
+    /// Whether the keycode went down or came up: a press of one already down,
+    /// or a release of one that is not, changes nothing.
+    fn key(&mut self, code: u32, down: bool) -> bool {
         let changed = if down { self.down.insert(code) } else { self.down.remove(&code) };
         if changed {
             self.state.update_key(xkb::Keycode::new(code), if down { xkb::KeyDirection::Down } else { xkb::KeyDirection::Up });
         }
+        changed
     }
 }
 
@@ -176,12 +180,11 @@ impl Keys {
             return Vec::new();
         };
         if down {
+            // A repeat sends nothing: see [`Keys::send_key`].
             if self.held.insert(code) {
                 self.fix_shift(code, level, keysym);
+                self.send_key(code, true);
             }
-            // A repeat goes out too: the state is as the first press left it,
-            // and stays so -- see [`Modifiers`].
-            self.send_key(code, true);
         } else {
             self.let_go(code);
         }
@@ -192,8 +195,8 @@ impl Keys {
         if self.held.remove(&code) {
             self.release(code);
         } else {
-            // A release of something not held: the compositor counts the
-            // state anyway, so send it as it is.
+            // A release of something the client does not hold, which is still
+            // a key to let go of when a correction left it down.
             self.send_key(code, false);
         }
     }
@@ -299,8 +302,21 @@ impl Keys {
         }
     }
 
+    /// A keycode going down or coming up, and nothing else: a press of a key
+    /// the compositor has down is not sent.
+    ///
+    /// A client repeats a held key as presses -- RFB has no other way to say
+    /// it, and a browser repeats a held modifier like any key -- and a Wayland
+    /// client repeats what it is given by itself, so the compositor needs none
+    /// of them. Sway takes each for a key of its own: it keeps the keys it has
+    /// been told are down in a table of 32, a held Shift fills that in a
+    /// second, and the key pressed next is then left out of it -- no binding
+    /// matches it, and its release is never passed to the application, which
+    /// goes on repeating it.
     fn send_key(&mut self, code: u32, down: bool) {
-        self.modifiers.key(code, down);
+        if !self.modifiers.key(code, down) {
+            return;
+        }
         let state = &self.modifiers.state;
         self.sent.push(Sent {
             code,
@@ -505,14 +521,31 @@ mod tests {
         let mut keys = Keys::new(&keymap());
         // `A` with no Shift held, as under Caps Lock: Shift is pressed for it.
         assert_eq!(wire(keys.key(XK_UPPER_A, true)), [(SHIFT, true, SHIFT_MASK), (A, true, SHIFT_MASK)]);
-        // The client presses that Shift itself, and it repeats.
+        // The client presses that Shift itself, and it repeats: it is down.
         for _ in 0..3 {
-            assert_eq!(wire(keys.key(XK_SHIFT_L, true)), [(SHIFT, true, SHIFT_MASK)]);
+            assert_eq!(wire(keys.key(XK_SHIFT_L, true)), []);
         }
         // Letting go of `A` leaves the Shift the client now holds.
         assert_eq!(wire(keys.key(XK_UPPER_A, false)), [(A, false, SHIFT_MASK)]);
         // So the Tab that follows is Shift+Tab.
         assert_eq!(wire(keys.key(XK_TAB, true)), [(TAB, true, SHIFT_MASK)]);
+        assert_eq!(wire(keys.key(XK_TAB, false)), [(TAB, false, SHIFT_MASK)]);
+        assert_eq!(wire(keys.key(XK_SHIFT_L, false)), [(SHIFT, false, 0)]);
+        assert_eq!(wire(keys.release_all()), []);
+    }
+
+    #[test]
+    fn a_held_key_is_pressed_once_however_often_the_client_repeats_it() {
+        let mut keys = Keys::new(&keymap());
+        assert_eq!(wire(keys.key(XK_SHIFT_L, true)), [(SHIFT, true, SHIFT_MASK)]);
+        // Sway's table of pressed keys holds 32.
+        for _ in 0..40 {
+            assert_eq!(wire(keys.key(XK_SHIFT_L, true)), []);
+        }
+        assert_eq!(wire(keys.key(XK_TAB, true)), [(TAB, true, SHIFT_MASK)]);
+        for _ in 0..40 {
+            assert_eq!(wire(keys.key(XK_TAB, true)), []);
+        }
         assert_eq!(wire(keys.key(XK_TAB, false)), [(TAB, false, SHIFT_MASK)]);
         assert_eq!(wire(keys.key(XK_SHIFT_L, false)), [(SHIFT, false, 0)]);
         assert_eq!(wire(keys.release_all()), []);
@@ -540,7 +573,7 @@ mod tests {
         let mut keys = Keys::new(&keymap());
         assert_eq!(wire(keys.desk_key(FIRST, XK_TAB, true)), [(TAB, true, 0)]);
         // The second press of a key already down is a repeat.
-        assert_eq!(wire(keys.desk_key(BESIDE, XK_TAB, true)), [(TAB, true, 0)]);
+        assert_eq!(wire(keys.desk_key(BESIDE, XK_TAB, true)), []);
         assert_eq!(wire(keys.desk_key(FIRST, XK_TAB, false)), []);
         assert_eq!(wire(keys.desk_key(BESIDE, XK_TAB, false)), [(TAB, false, 0)]);
     }

@@ -987,9 +987,12 @@ uploads it to the virtual keyboard, and searches the same keymap for a keycode
 producing each keysym, preferring the lowest shift level. Modifier state is
 tracked with `xkb_state` and sent after every key. The state is fed a keycode's
 transitions only: xkb counts a modifier key's presses and holds the modifier
-until as many releases arrive, so a repeat of a held modifier — the browser
-auto-repeats Control like any key on some platforms — is forwarded as a key
-and kept out of the state. A character keysym names a
+until as many releases arrive. The compositor is sent the same and no more:
+a client repeats a held key as presses — a browser repeats a held modifier
+like any key — and none of them is forwarded, since a Wayland client repeats
+by itself and Sway takes each press for a key of its own, filling its table of
+32 pressed keys until the next key matches no binding and its release never
+reaches the application. A character keysym names a
 character the client has already cased — remotex never forwards Caps Lock and
 sends `A` or `a` as the browser resolved it — so before each press the server
 checks what the keycode would produce under the current modifiers, and presses
