@@ -10,7 +10,8 @@
 //! own for as long as it listens ([`audio`]), and a client that plugs a camera
 //! gets a PipeWire video source, decoded by libavcodec, for as long as it is
 //! plugged ([`camera`], [`decode`]); a client that plugs a microphone gets a
-//! PipeWire audio source the same way ([`microphone`]).
+//! PipeWire audio source the same way ([`microphone`]). A configured command
+//! runs when the desktop is taken and another when it is released ([`hooks`]).
 
 mod audio;
 mod auth;
@@ -22,6 +23,7 @@ mod config;
 mod cursor;
 mod decode;
 mod framebuffer;
+mod hooks;
 mod input;
 mod microphone;
 mod outputs;
@@ -222,6 +224,13 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await.with_context(|| format!("listening on {}", config.listen))?;
     info!("listening on {}", config.listen);
+    let hooks = config.hooks.clone().map(|hooks| {
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        (stop, tokio::spawn(hooks::run(shared.clone(), hooks, stopped)))
+    });
+    // What systemd stops a unit with; without a handler it ends the process
+    // where it stands, a taken desktop left as the hook made it.
+    let mut terminated = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).context("handling SIGTERM")?;
     let session_config = Arc::new(session::SessionConfig {
         security,
         name: config.name.clone(),
@@ -232,10 +241,13 @@ async fn serve(
         microphone: config.microphone,
         handshake_timeout: std::time::Duration::from_secs(config.handshake_timeout_secs),
     });
-    loop {
+    let result = loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (socket, peer) = accepted.context("accepting a client")?;
+                let (socket, peer) = match accepted.context("accepting a client") {
+                    Ok(accepted) => accepted,
+                    Err(e) => break Err(e),
+                };
                 let id = shared.next_client();
                 info!("client {} connected from {peer}", id.0);
                 let shared = shared.clone();
@@ -249,15 +261,27 @@ async fn serve(
                 });
             }
             result = compositor.exited() => {
-                return match result {
+                break match result {
                     Ok(()) => Err(anyhow::anyhow!("the compositor connection closed")),
                     Err(e) => Err(e),
                 };
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("interrupted");
-                return Ok(());
+                break Ok(());
+            }
+            _ = terminated.recv() => {
+                info!("terminated");
+                break Ok(());
             }
         }
+    };
+    // However the daemon stops, a desktop the hooks took is released first.
+    if let Some((stop, task)) = hooks {
+        let _ = stop.send(());
+        if let Err(e) = task.await {
+            error!("the hooks task: {e}");
+        }
     }
+    result
 }
