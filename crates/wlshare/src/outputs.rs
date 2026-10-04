@@ -244,7 +244,14 @@ impl Outputs {
         }
         let chosen = match named {
             Some(output) => output,
-            None => self.outputs.first().ok_or_else(|| anyhow::anyhow!("the compositor has no outputs"))?,
+            // The first with a name: one without cannot be shared, and being
+            // listed first should not keep the daemon off one that can.
+            None => self
+                .outputs
+                .iter()
+                .find(|o| o.name.is_some())
+                .or(self.outputs.first())
+                .ok_or_else(|| anyhow::anyhow!("the compositor has no outputs"))?,
         };
         let name = chosen.name.clone().ok_or_else(|| anyhow::anyhow!("the output has no name; wl_output version 4 is required"))?;
         info!(
