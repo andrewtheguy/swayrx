@@ -10,7 +10,8 @@
 //! a change the socket reports.
 //!
 //! It knows nothing of what the commands did before it started, so the first
-//! thing it does is run the one for where the desktop stands: both have to be
+//! thing it does, once the daemon has said where the desktop stands or has
+//! turned out not to be there, is run the one for that: both have to be
 //! safe to run on a session already as they would leave it. After that a
 //! command runs only when the desktop stands otherwise than the last one said.
 //!
@@ -59,10 +60,11 @@ impl Watch {
     }
 }
 
-/// Keep the session at what `desktop` says, until `stop` is sent or dropped or
+/// Keep the session at what `desktop` says — `None` being not known yet, for
+/// which nothing runs — until `stop` is sent or dropped or
 /// nothing is following the daemon any more. The desktop is then freed, if the
 /// last command said it was held: nothing else would put back what *held* did.
-pub async fn run(mut desktop: watch::Receiver<bool>, watch: Watch, mut stop: oneshot::Receiver<()>) {
+pub async fn run(mut desktop: watch::Receiver<Option<bool>>, watch: Watch, mut stop: oneshot::Receiver<()>) {
     let timeout = Duration::from_secs(watch.timeout_secs);
     // What the last command told the session: held, or free. None has run yet,
     // and what the session was left as is not known.
@@ -71,7 +73,7 @@ pub async fn run(mut desktop: watch::Receiver<bool>, watch: Watch, mut stop: one
     let mut vacant_since: Option<Instant> = None;
     loop {
         let held = observe(&mut desktop, &mut vacant_since);
-        if established == Some(held) {
+        if held.is_none() || established == held {
             tokio::select! {
                 biased;
                 _ = &mut stop => break,
@@ -96,6 +98,7 @@ pub async fn run(mut desktop: watch::Receiver<bool>, watch: Watch, mut stop: one
                 },
             }
         }
+        let held = held == Some(true);
         let (name, command) = if held { ("held", &watch.held) } else { ("free", &watch.free) };
         if let Some(command) = command {
             let running = run_command(name, command, timeout);
@@ -122,13 +125,16 @@ pub async fn run(mut desktop: watch::Receiver<bool>, watch: Watch, mut stop: one
     }
 }
 
-/// Whether the desktop is held now, with `vacant_since` kept to match.
-fn observe(desktop: &mut watch::Receiver<bool>, vacant_since: &mut Option<Instant>) -> bool {
+/// Whether the desktop is held now, if that is known yet, with `vacant_since`
+/// kept to match.
+fn observe(desktop: &mut watch::Receiver<Option<bool>>, vacant_since: &mut Option<Instant>) -> Option<bool> {
     let held = *desktop.borrow_and_update();
-    if held {
-        *vacant_since = None;
-    } else {
-        vacant_since.get_or_insert_with(Instant::now);
+    match held {
+        Some(true) => *vacant_since = None,
+        Some(false) => {
+            vacant_since.get_or_insert_with(Instant::now);
+        }
+        None => {}
     }
     held
 }
@@ -217,7 +223,7 @@ mod tests {
         // Free when the watcher starts, as after a daemon that was killed with
         // the desktop held: the session is put back, once the wait is over.
         let log = dir.join("free");
-        let (_desktop, following) = watch::channel(false);
+        let (_desktop, following) = watch::channel(Some(false));
         let (_stop, stopped) = oneshot::channel();
         let task = tokio::spawn(run(following, watch(&log, 1), stopped));
         settle().await;
@@ -227,7 +233,7 @@ mod tests {
         task.abort();
         // Held when it starts: no wait.
         let log = dir.join("held");
-        let (_desktop, following) = watch::channel(true);
+        let (_desktop, following) = watch::channel(Some(true));
         let (_stop, stopped) = oneshot::channel();
         let task = tokio::spawn(run(following, watch(&log, 1), stopped));
         settle().await;
@@ -237,23 +243,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nothing_runs_until_the_desktop_is_known() {
+        let dir = tempfile_dir("unknown");
+        let log = dir.join("log");
+        // No wait at all, which is what would run `free` at once.
+        let (desktop, following) = watch::channel(None);
+        let (stop, stopped) = oneshot::channel();
+        let task = tokio::spawn(run(following, watch(&log, 0), stopped));
+        settle().await;
+        assert_eq!(lines(&log), Vec::<String>::new());
+        // Held is the first thing known, and the first thing run.
+        desktop.send(Some(true)).unwrap();
+        settle().await;
+        assert_eq!(lines(&log), ["held"]);
+        stop.send(()).unwrap();
+        task.await.unwrap();
+        assert_eq!(lines(&log), ["held", "free"]);
+        // Stopped before anything was known: nothing.
+        let log = dir.join("stopped");
+        let (_desktop, following) = watch::channel(None);
+        let (stop, stopped) = oneshot::channel();
+        let task = tokio::spawn(run(following, watch(&log, 0), stopped));
+        settle().await;
+        stop.send(()).unwrap();
+        task.await.unwrap();
+        assert_eq!(lines(&log), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn a_desktop_left_and_taken_inside_the_wait_runs_nothing() {
         let dir = tempfile_dir("wait");
         let log = dir.join("log");
-        let (desktop, following) = watch::channel(true);
+        let (desktop, following) = watch::channel(Some(true));
         let (_stop, stopped) = oneshot::channel();
         let task = tokio::spawn(run(following, watch(&log, 1), stopped));
         settle().await;
         assert_eq!(lines(&log), ["held"]);
         // Left and back inside the wait, as a client on a flapping link is and
         // as a daemon that was restarted is: nothing.
-        desktop.send(false).unwrap();
+        desktop.send(Some(false)).unwrap();
         settle().await;
-        desktop.send(true).unwrap();
+        desktop.send(Some(true)).unwrap();
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert_eq!(lines(&log), ["held"]);
         // Left for good: freed once the wait is up, not before.
-        desktop.send(false).unwrap();
+        desktop.send(Some(false)).unwrap();
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert_eq!(lines(&log), ["held"]);
         tokio::time::sleep(Duration::from_millis(800)).await;
@@ -272,18 +307,18 @@ mod tests {
             free_after_secs: 0,
             timeout_secs: 5,
         };
-        let (desktop, following) = watch::channel(true);
+        let (desktop, following) = watch::channel(Some(true));
         let (_stop, stopped) = oneshot::channel();
         let task = tokio::spawn(run(following, watch, stopped));
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Left and held again while the slow command runs: it ends with the
         // desktop held, which is what it said, so nothing more.
-        desktop.send(false).unwrap();
-        desktop.send(true).unwrap();
+        desktop.send(Some(false)).unwrap();
+        desktop.send(Some(true)).unwrap();
         tokio::time::sleep(Duration::from_millis(800)).await;
         assert_eq!(lines(&log), ["held"]);
         // With no command running and no wait, the desktop is freed at once.
-        desktop.send(false).unwrap();
+        desktop.send(Some(false)).unwrap();
         settle().await;
         assert_eq!(lines(&log), ["held", "free"]);
         task.abort();
@@ -302,11 +337,11 @@ mod tests {
             free_after_secs: 0,
             timeout_secs: 1,
         };
-        let (desktop, following) = watch::channel(true);
+        let (desktop, following) = watch::channel(Some(true));
         let (_stop, stopped) = oneshot::channel();
         let task = tokio::spawn(run(following, watch, stopped));
         tokio::time::sleep(Duration::from_millis(200)).await;
-        desktop.send(false).unwrap();
+        desktop.send(Some(false)).unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert_eq!(lines(&log), ["free"]);
         // Past when the child would have written: it went with its group.
@@ -326,13 +361,13 @@ mod tests {
             free_after_secs: 1,
             timeout_secs: 5,
         };
-        let (desktop, following) = watch::channel(true);
+        let (desktop, following) = watch::channel(Some(true));
         let (_stop, stopped) = oneshot::channel();
         let task = tokio::spawn(run(following, watch, stopped));
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Left while the slow command runs: the wait is over soon after it
         // ends, and one counted from its end would not be for another second.
-        desktop.send(false).unwrap();
+        desktop.send(Some(false)).unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert_eq!(lines(&log), ["held", "free"]);
         task.abort();
@@ -344,7 +379,7 @@ mod tests {
         let dir = tempfile_dir("stop");
         let log = dir.join("log");
         // No command has run yet: nothing of the watcher's to put back.
-        let (_desktop, following) = watch::channel(false);
+        let (_desktop, following) = watch::channel(Some(false));
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(run(following, watch(&log, 60), stopped));
         settle().await;
@@ -352,7 +387,7 @@ mod tests {
         task.await.unwrap();
         assert_eq!(lines(&log), Vec::<String>::new());
         // Held when it stops: freed, and with no wait.
-        let (_desktop, following) = watch::channel(true);
+        let (_desktop, following) = watch::channel(Some(true));
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(run(following, watch(&log, 60), stopped));
         settle().await;

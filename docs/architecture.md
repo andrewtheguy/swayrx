@@ -103,7 +103,9 @@ this is a socket and not a command the daemon runs. The kernel closes it when
 the daemon is gone, whether it stopped, panicked or was killed where it stood,
 so a daemon that never got to say the desktop was free has said so all the same.
 The file is removed by a daemon that stops in order and replaced by the next one
-otherwise.
+otherwise. A socket that still answers is another daemon's: a second one
+refuses to start on it rather than take its followers, and a daemon removes
+the file only while it is still the one it made.
 
 ### The watcher
 
@@ -118,7 +120,9 @@ which of them is restarted.
 
 It keeps the session at a state rather than reporting transitions. The first
 command it runs is the one for where the desktop stands when it starts, since
-it cannot know what an earlier watcher left behind; after that a command runs
+it cannot know what an earlier watcher left behind, and it runs nothing until
+that is known — the daemon has said, or cannot be reached — so a watcher
+started under a client never frees the desktop first; after that a command runs
 only when the desktop stands otherwise than the last command said. Both
 commands therefore have to be safe to run on a session already as they would
 leave it. The wait before *free* is what keeps a flapping link from flapping

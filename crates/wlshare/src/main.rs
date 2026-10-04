@@ -116,7 +116,8 @@ fn follow(config: &config::Config, config_path: &std::path::Path, watch: watch::
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let mut terminated = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).context("handling SIGTERM")?;
-        let (held, desktop) = tokio::sync::watch::channel(false);
+        // Not known until the daemon has said, or has turned out not to be there.
+        let (held, desktop) = tokio::sync::watch::channel(None);
         let following = tokio::spawn(state::follow(socket, held));
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let watching = tokio::spawn(watch::run(desktop, watch, stopped));

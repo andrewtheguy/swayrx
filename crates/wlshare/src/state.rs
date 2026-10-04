@@ -10,7 +10,9 @@
 //! the daemon is gone, however it went, so a follower learns of a daemon that
 //! was killed where it stood exactly as it learns of one that stopped: nothing
 //! the daemon does on its way out is being counted on. [`follow`] is that
-//! follower, and reads a daemon it cannot reach as a desktop nobody holds.
+//! follower, and reads a daemon it cannot reach as a desktop nobody holds; until
+//! it has either reached the daemon and been told, or failed to, it says
+//! nothing of the desktop at all.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,22 +46,42 @@ pub fn path(configured: &Path) -> anyhow::Result<PathBuf> {
 }
 
 /// The socket's file, removed when this is dropped: a follower that finds no
-/// file knows as much as one whose connection is refused, sooner.
-pub struct Bound(PathBuf);
+/// file knows as much as one whose connection is refused, sooner. The file is
+/// known by its device and inode as well as its path, and one that is no longer
+/// the file this made is another daemon's, and left.
+pub struct Bound {
+    path: PathBuf,
+    file: (u64, u64),
+}
 
 impl Drop for Bound {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if file(&self.path).is_ok_and(|file| file == self.file) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
-/// Listen at `path`, in place of whatever a daemon before this one left there.
-/// Only the owner can connect.
+/// The device and inode of what is at `path`.
+fn file(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = std::fs::symlink_metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// Held while the process's file mode creation mask is not its own.
+static MASK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Listen at `path`, in place of whatever a daemon before this one left there
+/// — but not in place of a daemon that is still listening, which keeps its
+/// followers. Only the owner can connect.
 pub fn bind(path: &Path) -> anyhow::Result<(UnixListener, Bound)> {
     use std::os::unix::fs::DirBuilderExt as _;
     if let Some(dir) = path.parent() {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    // A socket nothing answers on is one a daemon left behind.
+    anyhow::ensure!(std::os::unix::net::UnixStream::connect(path).is_err(), "another daemon is listening on {}", path.display());
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -68,14 +90,20 @@ pub fn bind(path: &Path) -> anyhow::Result<(UnixListener, Bound)> {
     // The owner's alone from the moment it exists: a mode set afterwards would
     // leave it open to others in between, in a directory this did not make.
     // The mask is the whole process's, and all another thread could get from it
-    // meanwhile is a file more closed than it asked for.
-    // SAFETY: umask only swaps the process's file mode creation mask.
-    let mask = unsafe { libc::umask(0o177) };
-    let listener = UnixListener::bind(path);
-    // SAFETY: as above, putting back the mask it returned.
-    unsafe { libc::umask(mask) };
+    // meanwhile is a file more closed than it asked for; two of these at once
+    // would each put back the other's, so one runs at a time.
+    let listener = {
+        let _one = MASK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: umask only swaps the process's file mode creation mask.
+        let mask = unsafe { libc::umask(0o177) };
+        let listener = UnixListener::bind(path);
+        // SAFETY: as above, putting back the mask it returned.
+        unsafe { libc::umask(mask) };
+        listener
+    };
     let listener = listener.with_context(|| format!("listening on {}", path.display()))?;
-    Ok((listener, Bound(path.to_owned())))
+    let file = file(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok((listener, Bound { path: path.to_owned(), file }))
 }
 
 /// Accept followers for as long as the daemon runs.
@@ -121,9 +149,11 @@ async fn tell(mut stream: UnixStream, mut seats: watch::Receiver<Seats>) {
 
 /// Keep `held` at what the daemon listening at `path` says, for good. A daemon
 /// that cannot be reached — not started yet, stopped, killed — holds nothing,
-/// and the socket is tried again until it is there.
-pub async fn follow(path: PathBuf, held: watch::Sender<bool>) {
-    let set = |now: bool| held.send_if_modified(|held| std::mem::replace(held, now) != now);
+/// and the socket is tried again until it is there. `held` is left as it was
+/// given, which is `None` for not known yet, until the daemon has said where
+/// the desktop stands or has turned out not to be there.
+pub async fn follow(path: PathBuf, held: watch::Sender<Option<bool>>) {
+    let set = |now: bool| held.send_if_modified(|held| held.replace(now) != Some(now));
     // Whether the last attempt reached the daemon, so that a daemon that stays
     // away is logged once.
     let mut reached = true;
@@ -182,6 +212,17 @@ mod tests {
         dir
     }
 
+    /// The process's file mode creation mask, read while no bind has it.
+    fn mask() -> libc::mode_t {
+        let _one = MASK.lock().unwrap();
+        // SAFETY: umask only swaps the mask, and this puts it straight back.
+        unsafe {
+            let mask = libc::umask(0);
+            libc::umask(mask);
+            mask
+        }
+    }
+
     /// What has arrived on `stream` within a moment, read with nothing of the
     /// module's own.
     async fn arrived(stream: &mut UnixStream) -> String {
@@ -231,20 +272,39 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = dir("bind");
         let path = dir.join("state.sock");
-        // A daemon killed where it stood leaves its file.
+        // A daemon still listening keeps its socket and its followers.
         let (listener, bound) = bind(&path).unwrap();
+        assert!(bind(&path).is_err());
+        UnixStream::connect(&path).await.unwrap();
+        // A daemon killed where it stood leaves its file.
         std::mem::forget(bound);
         drop(listener);
-        // SAFETY: umask only swaps the process's file mode creation mask.
-        let mask = unsafe { libc::umask(0o022) };
+        let before = mask();
         let (_listener, _bound) = bind(&path).unwrap();
-        // SAFETY: as above.
-        let restored = unsafe { libc::umask(mask) };
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         // The mask the process had is the one it has again.
-        assert_eq!(restored, 0o022);
+        assert_eq!(mask(), before);
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_stops_leaves_a_socket_that_is_no_longer_its_own() {
+        let dir = dir("unlink");
+        let path = dir.join("state.sock");
+        // Still listening, so its inode is not one the next socket can be given.
+        let (_listener, bound) = bind(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let _other = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        drop(bound);
+        assert!(path.exists());
+        // Its own it removes.
+        let dir = dir.join("own");
+        let path = dir.join("state.sock");
+        let (_listener, bound) = bind(&path).unwrap();
+        drop(bound);
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
     #[tokio::test]
@@ -252,28 +312,49 @@ mod tests {
         let dir = dir("follow");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.sock");
-        let (held, mut seen) = watch::channel(false);
+        let (held, mut seen) = watch::channel(None);
         let following = tokio::spawn(follow(path.clone(), held));
         // No daemon yet: nothing holds it, and the socket is tried again. The
         // daemon here is a plain listener writing the lines by hand.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!*seen.borrow_and_update());
+        assert_eq!(*seen.borrow_and_update(), Some(false));
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
         let listener = UnixListener::from_std(listener).unwrap();
         let (mut daemon, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept()).await.unwrap().unwrap();
         daemon.write_all(b"free\nheld\n").await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), seen.wait_for(|held| *held)).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), seen.wait_for(|held| *held == Some(true))).await.unwrap().unwrap();
         // Killed: no word, only the end of the stream.
         drop(daemon);
-        tokio::time::timeout(Duration::from_secs(1), seen.wait_for(|held| !*held)).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), seen.wait_for(|held| *held == Some(false))).await.unwrap().unwrap();
         // And back: the follower finds it again by itself.
         let (mut daemon, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept()).await.unwrap().unwrap();
         daemon.write_all(b"held\n").await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), seen.wait_for(|held| *held)).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), seen.wait_for(|held| *held == Some(true))).await.unwrap().unwrap();
         // A word it does not know ends the connection, held by nobody.
         daemon.write_all(b"taken\n").await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), seen.wait_for(|held| !*held)).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), seen.wait_for(|held| *held == Some(false))).await.unwrap().unwrap();
+        following.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_follower_says_nothing_of_the_desktop_until_the_daemon_has() {
+        let dir = dir("unknown");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.sock");
+        // A daemon that is there and has not spoken yet.
+        let listener = UnixListener::bind(&path).unwrap();
+        let (held, mut seen) = watch::channel(None);
+        let following = tokio::spawn(follow(path.clone(), held));
+        let (mut daemon, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(*seen.borrow_and_update(), None);
+        daemon.write_all(b"held\n").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), seen.changed()).await.unwrap().unwrap();
+        // Held is the first thing it says: a free before it would have turned
+        // the monitors on under a client.
+        assert_eq!(*seen.borrow_and_update(), Some(true));
         following.abort();
         let _ = std::fs::remove_dir_all(dir);
     }
