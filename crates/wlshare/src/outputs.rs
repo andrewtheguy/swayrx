@@ -33,7 +33,7 @@ use wayland_protocols_wlr::output_management::v1::client::{
 use wlshare_rfb::outputs::OutputEntry;
 
 use crate::compositor::Compositor;
-use crate::shared::{ClientId, Event};
+use crate::shared::{ClientId, Event, FIRST};
 
 pub struct OutputInfo {
     pub output: WlOutput,
@@ -102,23 +102,24 @@ pub struct Outputs {
     pub modes: HashMap<ObjectId, ModeInfo>,
     pub manager: Option<ZwlrOutputManagerV1>,
     pub serial: u32,
-    /// The name of the shared output, once chosen.
-    pub selected: Option<String>,
-    /// The declaration whose configuration is out and not settled yet. One at a
-    /// time: its settling is told apart from nothing else.
-    pub declaring: Option<u64>,
+    /// The name of each desk's shared output, once chosen.
+    pub selected: [Option<String>; 2],
+    /// The declaration whose configuration is out and not settled yet, and the
+    /// desk it is for. One at a time, whichever desk asked: its settling is
+    /// told apart from nothing else, and a configuration names every head.
+    pub declaring: Option<(u64, usize)>,
     /// The id the next declaration takes.
     pub next_declaration: u64,
 }
 
 impl Outputs {
-    pub fn selected(&self) -> Option<&OutputInfo> {
-        let name = self.selected.as_deref()?;
+    pub fn selected(&self, desk: usize) -> Option<&OutputInfo> {
+        let name = self.selected[desk].as_deref()?;
         self.outputs.iter().find(|o| o.name.as_deref() == Some(name))
     }
 
-    pub fn selected_head(&self) -> Option<&Head> {
-        let name = self.selected.as_deref()?;
+    pub fn selected_head(&self, desk: usize) -> Option<&Head> {
+        let name = self.selected[desk].as_deref()?;
         self.head(name)
     }
 
@@ -126,9 +127,14 @@ impl Outputs {
         self.heads.iter().find(|h| h.name.as_deref() == Some(name))
     }
 
-    /// The exact scale of the shared output: the head's, or `wl_output`'s.
-    pub fn scale(&self) -> f64 {
-        self.selected().map_or(1.0, |o| self.scale_of(o))
+    /// The desks sharing the output of this name.
+    pub fn desks_on(&self, name: Option<&str>) -> Vec<usize> {
+        (0..self.selected.len()).filter(|&desk| name.is_some() && self.selected[desk].as_deref() == name).collect()
+    }
+
+    /// The exact scale of a desk's shared output: the head's, or `wl_output`'s.
+    pub fn scale(&self, desk: usize) -> f64 {
+        self.selected(desk).map_or(1.0, |o| self.scale_of(o))
     }
 
     /// The exact scale `output` is drawn at: its head's, or `wl_output`'s.
@@ -141,10 +147,10 @@ impl Outputs {
         f64::from(output.wl_scale.max(1))
     }
 
-    /// The shared output's size in pixels as the head reports it, falling back
-    /// to `wl_output`'s mode.
-    pub fn size(&self) -> (u16, u16) {
-        self.selected().map_or((0, 0), |o| self.size_of(o))
+    /// A desk's shared output's size in pixels as the head reports it, falling
+    /// back to `wl_output`'s mode.
+    pub fn size(&self, desk: usize) -> (u16, u16) {
+        self.selected(desk).map_or((0, 0), |o| self.size_of(o))
     }
 
     /// The framebuffer size a capture of `output` has, as its head reports the
@@ -165,11 +171,11 @@ impl Outputs {
         (w.clamp(0, i32::from(u16::MAX)) as u16, h.clamp(0, i32::from(u16::MAX)) as u16)
     }
 
-    /// The shared output's id, or 0 while there is none: the `wl_output` global,
-    /// which is unique for as long as the output exists and is what a client
-    /// names in a `SelectOutput`.
-    pub fn active_id(&self) -> u32 {
-        self.selected().map_or(0, |o| o.global)
+    /// A desk's shared output's id, or 0 while there is none: the `wl_output`
+    /// global, which is unique for as long as the output exists and is what a
+    /// client names in a `SelectOutput`.
+    pub fn active_id(&self, desk: usize) -> u32 {
+        self.selected(desk).map_or(0, |o| o.global)
     }
 
     /// The outputs a client may choose between, by name so the order a menu
@@ -236,16 +242,18 @@ impl Outputs {
             self.heads.iter().find(|h| h.name.as_deref() == Some(&name)).and_then(|h| h.scale).unwrap_or(f64::from(chosen.wl_scale)),
             if chosen.is_headless() { ", headless" } else { "" }
         );
-        self.selected = Some(name);
+        self.selected[crate::shared::FIRST] = Some(name);
         Ok(())
     }
 
-    /// Apply a configuration that changes the shared output's mode, when `size`
-    /// is given, and its scale, when `scale` is, leaving every other property of
-    /// every head as the compositor has it. `false` when nothing was sent.
+    /// Apply a configuration that changes a desk's shared output's mode, when
+    /// `size` is given, and its scale, when `scale` is, leaving every other
+    /// property of every head as the compositor has it. `false` when nothing was
+    /// sent.
     pub fn configure(
         &mut self,
         qh: &QueueHandle<Compositor>,
+        desk: usize,
         size: Option<(u16, u16)>,
         scale: Option<f64>,
         kind: ConfigKind,
@@ -254,21 +262,21 @@ impl Outputs {
             info!("wlr-output-management is not available; not reconfiguring the output");
             return false;
         };
-        let Some(selected) = self.selected() else { return false };
+        let Some(selected) = self.selected(desk) else { return false };
         if !selected.is_headless() {
             info!("not reconfiguring {}: not a headless output", selected.name.as_deref().unwrap_or("?"));
             return false;
         }
         let name = selected.name.clone();
         let refresh = self
-            .selected_head()
+            .selected_head(desk)
             .and_then(|h| h.current_mode.as_ref())
             .and_then(|m| self.modes.get(m))
             .map_or(0, |m| m.refresh);
 
         let config = manager.create_configuration(self.serial, qh, kind);
         if let ConfigKind::Declare { id } = kind {
-            self.declaring = Some(id);
+            self.declaring = Some((id, desk));
         }
         for head in &self.heads {
             if !head.enabled {
@@ -308,12 +316,12 @@ impl Dispatch<WlOutput, ()> for Compositor {
             wl_output::Event::Name { name } => info.name = Some(name),
             wl_output::Event::Done => {
                 info.done = true;
-                let selected = state.outputs.selected.as_deref() == info.name.as_deref();
-                if selected {
-                    state.geometry_changed();
+                let name = info.name.clone();
+                for desk in state.outputs.desks_on(name.as_deref()) {
+                    state.geometry_changed(desk);
                 }
                 state.outputs_changed();
-                if state.outputs.selected.is_none() {
+                if state.outputs.selected[FIRST].is_none() {
                     // Nothing is shared, and this output has just become
                     // something that can be: the desktop starts again on it.
                     state.adopt_output();
@@ -332,22 +340,21 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for Compositor {
             }
             zwlr_output_manager_v1::Event::Done { serial } => {
                 state.outputs.serial = serial;
-                let selected = state.outputs.selected.clone();
-                let mut changed = false;
+                let mut changed = Vec::new();
                 for head in &mut state.outputs.heads {
-                    if head.scale_changed {
-                        head.scale_changed = false;
-                        if head.name == selected {
-                            changed = true;
-                        }
+                    if std::mem::take(&mut head.scale_changed) {
+                        changed.push(head.name.clone());
                     }
                 }
-                if changed {
-                    // The report this sends answers the declaration out, if any.
-                    let settled = state.outputs.declaring.take().is_some();
-                    state.geometry_changed();
-                    if settled {
-                        state.declaration_settled();
+                for name in changed {
+                    for desk in state.outputs.desks_on(name.as_deref()) {
+                        // The report this sends answers the declaration out
+                        // for that desk, if any.
+                        let settled = state.outputs.declaring.take_if(|(_, declaring)| *declaring == desk).is_some();
+                        state.geometry_changed(desk);
+                        if settled {
+                            state.declaration_settled();
+                        }
                     }
                 }
                 // A head's scale or mode is in every entry's label, not only the
@@ -435,7 +442,7 @@ impl Dispatch<ZwlrOutputConfigurationV1, ConfigKind> for Compositor {
                     // measured compositor, sends them first when it commits on the
                     // spot. One round trip later, whatever the compositor was going
                     // to send has arrived.
-                    if state.outputs.declaring == Some(id) {
+                    if state.outputs.declaring.is_some_and(|(declaring, _)| declaring == id) {
                         conn.display().sync(qh, ScaleSettle { id });
                     }
                 }
@@ -444,14 +451,15 @@ impl Dispatch<ZwlrOutputConfigurationV1, ConfigKind> for Compositor {
                 warn!("the compositor refused an output configuration ({kind:?})");
                 match kind {
                     ConfigKind::Resize { client } => {
-                        state.pending_resize = None;
+                        if let Some(desk) = state.desk_of(*client) {
+                            state.desks[desk].pending_resize = None;
+                        }
                         state.shared().emit(Event::ResizeRefused { client: *client, status: wlshare_rfb::msg::EDS_STATUS_INVALID_LAYOUT });
                     }
                     ConfigKind::Declare { id } => {
-                        if state.outputs.declaring == Some(*id) {
-                            state.outputs.declaring = None;
-                            state.pending_resize = None;
-                            state.answer_geometry(None);
+                        if let Some((_, desk)) = state.outputs.declaring.take_if(|(declaring, _)| declaring == id) {
+                            state.desks[desk].pending_resize = None;
+                            state.answer_geometry(desk, None);
                             state.declaration_settled();
                         }
                     }
@@ -466,11 +474,10 @@ impl Dispatch<ZwlrOutputConfigurationV1, ConfigKind> for Compositor {
 impl Dispatch<WlCallback, ScaleSettle> for Compositor {
     fn event(state: &mut Self, _: &WlCallback, event: wl_callback::Event, settle: &ScaleSettle, _: &Connection, _: &QueueHandle<Self>) {
         if let wl_callback::Event::Done { .. } = event
-            && state.outputs.declaring == Some(settle.id)
+            && let Some((_, desk)) = state.outputs.declaring.take_if(|(declaring, _)| *declaring == settle.id)
         {
-            state.outputs.declaring = None;
             info!("the compositor applied the declaration's configuration without changing the scale; reporting the output as it is");
-            state.answer_geometry(None);
+            state.answer_geometry(desk, None);
             state.declaration_settled();
         }
     }

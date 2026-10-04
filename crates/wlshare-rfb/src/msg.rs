@@ -302,6 +302,12 @@ pub fn parse(buf: &[u8]) -> Result<Option<(ClientMsg, usize)>, ParseError> {
 /// The version banner, ours and the one a client must answer with.
 pub const PROTOCOL_VERSION: &[u8; 12] = b"RFB 003.008\n";
 
+/// The ClientInit byte with which a connection asks to be shown another output
+/// beside the client on the desktop, which it leaves there. RFB reads the byte
+/// as a shared flag, zero or not; wlshare takes the desktop for every other
+/// value, and a server that is not wlshare reads this one as shared.
+pub const CLIENT_INIT_BESIDE: u8 = 0xB5;
+
 /// Security type 1: no authentication, offered alone when nothing is configured.
 pub const SECURITY_NONE: u8 = 1;
 

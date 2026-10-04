@@ -16,7 +16,8 @@ PipeWire over the connection itself — and tells the client what pixel density 
 framebuffer is drawn at, which standard RFB cannot, so a `scale 2` output is
 shown sharp at 2x and a client's own density becomes the output's. A desktop with
 more than one monitor sends the client the list, so the one being shared is the
-client's to choose. The compositor pointer is excluded from captured frames, so
+client's to choose, and a second connection from that client is shown another
+output beside it, so two are seen at once. The compositor pointer is excluded from captured frames, so
 wlshare captures the cursor image on its own — whatever shape the application
 under it chose, at the output's pixel density — and sends it through the RFB
 Cursor pseudo-encodings, with its alpha to a client that lists Cursor With
