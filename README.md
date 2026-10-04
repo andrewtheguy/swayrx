@@ -158,6 +158,13 @@ Under `[pam]`, because the password PAM verifies is the account's, the stack can
 pass it on — a `pam_exec ... expose_authtok` line there is how a headless
 session gets its keyring unlocked at VNC login.
 
+`[hooks]` names a command to run when a client takes the desktop and one for
+when it has been released for a few seconds, so a sway session can move its
+windows onto the headless output the client is shown and turn its monitors off
+while they are watched from elsewhere, then put them back; the example
+configuration shows the two `swaymsg` lines, and
+[`docs/architecture.md`](docs/architecture.md#the-hooks) says when each runs.
+
 A custom keyboard layout — for a modifier remap the session's only keyboard has
 to carry — goes under `[xkb]`, with `XKB_CONFIG_EXTRA_PATH` in the unit's
 environment naming the directory that holds it. Each key must keep its keysym:

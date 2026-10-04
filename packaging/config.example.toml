@@ -76,6 +76,32 @@ microphone = false
 # The desktop name clients see.
 name = "wlshare"
 
+# Commands run through `sh -c`, with the daemon's environment, when the desktop
+# is taken by a client while nobody held it, and when it has been released --
+# its client gone and nobody back in its place -- for release_after_secs. The
+# two follow the desktop, not the connections: a takeover runs neither, and a
+# client that leaves and reconnects inside the grace runs neither. One hook runs
+# at a time, for at most timeout_secs before it is killed, so a hook that hangs
+# cannot hold back the one that follows.
+#
+# The case they are for: a sway session whose windows should move onto the
+# headless output a remote client is shown while the monitors go dark, and
+# back when it leaves. With `output = "HEADLESS-1"` above and a headless output
+# created at session start (`swaymsg create_output`, placed where no monitor is
+# adjacent), the two hooks are
+#
+#   taken    = "swaymsg 'output DP-1 disable, output DP-2 disable'"
+#   released = "swaymsg 'output DP-1 enable, output DP-2 enable'"
+#
+# since sway moves a disabled output's workspaces to an enabled one. A desktop
+# left dark is recovered the same way from a console or over SSH, with SWAYSOCK
+# set: `swaymsg 'output * enable'`.
+# [hooks]
+# taken = ""
+# released = ""
+# release_after_secs = 5
+# timeout_secs = 60
+
 # The keymap the virtual keyboard uploads and keysyms are resolved through, as
 # XKB rules/model/layout/variant/options names. Empty means the library default.
 # A custom layout directory is named by XKB_CONFIG_EXTRA_PATH in the environment.

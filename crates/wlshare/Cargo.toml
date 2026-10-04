@@ -21,7 +21,7 @@ env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "process"] }
 
 # The Wayland side. wayland-client dlopens libwayland-client at runtime.
 wayland-client = { version = "0.31", features = ["log"] }

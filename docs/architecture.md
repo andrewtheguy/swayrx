@@ -36,7 +36,8 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
   `microphone.rs` are PipeWire's side, and `decode.rs` is the camera's libavcodec decoder;
   `framebuffer.rs` is the shared pixels and damage;
   `session.rs` is one client; `auth.rs` checks an RSA-AES login and `pam.rs` is
-  the system half of that check; `shared.rs` is what crosses between them.
+  the system half of that check; `hooks.rs` runs the configured commands when
+  the desktop is taken and released; `shared.rs` is what crosses between them.
 
 Its client is the remotex gateway, which every viewer reaches the desktop
 through.
@@ -75,6 +76,36 @@ connection that joined after it, whether or not it ever saw itself there. That
 is the answer to the other end of the race — two connections whose joins are
 queued together, where the second is on the desktop before the first has
 subscribed at all.
+
+### The hooks
+
+The `[hooks]` table names a command for the moment the desktop is taken and one
+for the moment it is released, so the session can be rearranged around the
+client: sway can be told to disable the monitors, which moves their workspaces
+onto the headless output the client is shown, and to enable them again when the
+client is gone. The daemon itself does nothing to the session, since what to do
+is the compositor's and the operator's: the hooks run through `sh -c`, with the
+daemon's environment, inside the session.
+
+They follow the desktop, not the connections, and that is what makes them safe
+to point at the monitors. *Taken* runs when a client takes a desktop nobody
+held, and *released* when the client on it has left and nobody has taken it for
+`release_after_secs`. A takeover is the desktop passing from one client to
+another, held before and after, and runs neither; a client that drops and
+reconnects inside the grace runs neither either, so a flapping link does not
+flap the monitors. A display beside holds nothing and counts for nothing. The
+task reads the same `watch` of seats the sessions do, so what it sees is where
+the desktop stands now, however many joins and leaves happened in between.
+
+One hook runs at a time. When it exits, the hook for where the desktop stands
+*now* runs if that differs from what the last hook told it, so a slow *taken*
+followed by a leave is followed by *released*, and a slow *taken* followed by a
+leave and a return by nothing. A hook still running at `timeout_secs` is killed
+rather than waited on, because the hook that puts the monitors back is the one
+an operator is counting on; a hook's exit status is logged and changes nothing
+else. A desktop the hooks left dark is recovered with the same command the
+*released* hook runs, from a console or over SSH with `SWAYSOCK` set, or from a
+sway keybinding, since the keyboard still reaches the compositor.
 
 ## Capture
 

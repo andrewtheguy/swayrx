@@ -10,7 +10,8 @@
 //! own for as long as it listens ([`audio`]), and a client that plugs a camera
 //! gets a PipeWire video source, decoded by libavcodec, for as long as it is
 //! plugged ([`camera`], [`decode`]); a client that plugs a microphone gets a
-//! PipeWire audio source the same way ([`microphone`]).
+//! PipeWire audio source the same way ([`microphone`]). A configured command
+//! runs when the desktop is taken and another when it is released ([`hooks`]).
 
 mod audio;
 mod auth;
@@ -22,6 +23,7 @@ mod config;
 mod cursor;
 mod decode;
 mod framebuffer;
+mod hooks;
 mod input;
 mod microphone;
 mod outputs;
@@ -222,6 +224,9 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await.with_context(|| format!("listening on {}", config.listen))?;
     info!("listening on {}", config.listen);
+    if let Some(hooks) = config.hooks.clone() {
+        tokio::spawn(hooks::run(shared.clone(), hooks));
+    }
     let session_config = Arc::new(session::SessionConfig {
         security,
         name: config.name.clone(),

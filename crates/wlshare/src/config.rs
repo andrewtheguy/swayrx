@@ -1,12 +1,15 @@
 //! The configuration file: what the server listens on, who may connect, which
 //! output it shares, whether its sound goes with it, whether a client may lend
-//! it a camera and a microphone, and how the virtual keyboard is laid out.
+//! it a camera and a microphone, what runs when the desktop is taken and
+//! released, and how the virtual keyboard is laid out.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use serde::Deserialize;
+
+use crate::hooks::Hooks;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +67,10 @@ pub struct Config {
     pub name: String,
     #[serde(default)]
     pub xkb: Xkb,
+    /// Commands run when a client takes a desktop nobody held and when the
+    /// desktop has been left for a while: the compositor can be told to move
+    /// the windows onto a headless output and the monitors back on.
+    pub hooks: Option<Hooks>,
 }
 
 /// The keymap the virtual keyboard uploads and the server resolves keysyms
@@ -151,6 +158,9 @@ impl Config {
             !(self.pam.is_some() && self.password.is_some()),
             "[pam] and [password] are two answers to the same question; keep one"
         );
+        if let Some(hooks) = &self.hooks {
+            hooks.validate()?;
+        }
         Ok(())
     }
 
@@ -192,6 +202,19 @@ mod tests {
         assert!(!c.microphone);
         assert_eq!(c.name, "wlshare");
         assert!(c.xkb.layout.is_empty());
+        assert!(c.hooks.is_none());
+    }
+
+    #[test]
+    fn a_hooks_table_is_validated_with_the_rest() {
+        let c: Config = toml::from_str("[hooks]\ntaken = \"swaymsg 'output * disable'\"\nrelease_after_secs = 2").unwrap();
+        c.validate().unwrap();
+        let hooks = c.hooks.as_ref().unwrap();
+        assert_eq!(hooks.taken.as_deref(), Some("swaymsg 'output * disable'"));
+        assert_eq!(hooks.released, None);
+        assert_eq!(hooks.release_after_secs, 2);
+        let empty: Config = toml::from_str("[hooks]\n").unwrap();
+        assert!(empty.validate().is_err());
     }
 
     #[test]
