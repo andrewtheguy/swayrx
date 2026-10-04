@@ -102,8 +102,9 @@ One hook runs at a time. When it exits, the hook for where the desktop stands
 followed by a leave is followed by *released*, and a slow *taken* followed by a
 leave and a return by nothing. A hook still running at `timeout_secs` is killed
 rather than waited on, because the hook that puts the monitors back is the one
-an operator is counting on; a hook's exit status is logged and changes nothing
-else. A desktop the hooks left dark is recovered with the same command the
+an operator is counting on; each hook runs as a process group of its own and the
+group is what is killed, so what the shell started goes with it. A hook's exit
+status is logged and changes nothing else. A desktop the hooks left dark is recovered with the same command the
 *released* hook runs, from a console or over SSH with `SWAYSOCK` set, or from a
 sway keybinding, since the keyboard still reaches the compositor.
 

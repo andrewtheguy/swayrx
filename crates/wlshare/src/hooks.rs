@@ -14,7 +14,8 @@
 //! where the desktop stands *now* runs if that differs from what the last hook
 //! told it. A hook still running at `timeout_secs` is killed, so one that hangs
 //! cannot hold the other back: the one that puts the monitors back is the one
-//! an operator is counting on.
+//! an operator is counting on. Each hook is a process group of its own, and the
+//! whole group is what is killed: the shell is rarely the process that hangs.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,6 +102,8 @@ async fn run_hook(name: &str, command: &str, timeout: Duration) {
         .arg("-c")
         .arg(command)
         .stdin(std::process::Stdio::null())
+        // A group of its own, so a timeout reaches what the shell started.
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()
     {
@@ -113,6 +116,14 @@ async fn run_hook(name: &str, command: &str, timeout: Duration) {
         Ok(Err(e)) => error!("desktop {name}: waiting for the hook: {e}"),
         Err(_) => {
             error!("desktop {name}: hook still running after {}s; killing it", timeout.as_secs());
+            // The group is named by the shell's pid, which is still the
+            // shell's: nothing has waited for it.
+            if let Some(pid) = child.id()
+                && unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) } != 0
+            {
+                error!("desktop {name}: killing the hook's process group: {}", std::io::Error::last_os_error());
+            }
+            // The shell itself, should the group have been missed, and its reaping.
             if let Err(e) = child.kill().await {
                 error!("desktop {name}: killing the hook: {e}");
             }
@@ -209,7 +220,9 @@ mod tests {
         let log = dir.join("log");
         let shared = shared();
         let hooks = Hooks {
-            taken: Some("sleep 30".to_owned()),
+            // What hangs is the shell, and what would write late is a child of
+            // it that killing the shell alone leaves running.
+            taken: Some(format!("(sleep 2; echo late >> {}) & sleep 30", log.display())),
             released: Some(format!("echo released >> {}", log.display())),
             release_after_secs: 0,
             timeout_secs: 1,
@@ -219,6 +232,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         shared.set_holder(None);
         tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(lines(&log), ["released"]);
+        // Past when the child would have written: it went with its group.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
         assert_eq!(lines(&log), ["released"]);
         task.abort();
         let _ = std::fs::remove_dir_all(dir);
