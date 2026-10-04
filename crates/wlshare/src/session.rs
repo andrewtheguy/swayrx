@@ -241,6 +241,12 @@ pub struct Writer {
 }
 
 impl Writer {
+    /// The socket under both halves, for what neither half is asked: whether
+    /// the peer is still there while nothing is being read or written.
+    fn socket(&self) -> &TcpStream {
+        self.inner.as_ref()
+    }
+
     async fn send(&mut self, message: &[u8]) -> std::io::Result<()> {
         match &mut self.sealer {
             Some(sealer) => self.inner.write_all(&sealer.frame(message)).await,
@@ -277,7 +283,18 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
             && !shared.displays().shares(FIRST, wanted)
         {
             info!("client {}: waiting up to {:?} for output {wanted}", id.0, config.output_wait);
-            if !output_shared(&shared, wanted, config.output_wait, &mut arrivals).await {
+            // The desktop is held for as long as this waits, so it waits for
+            // nobody who is no longer owed it: a client that left, or one a
+            // later connection took the desktop from.
+            let arrived = tokio::select! {
+                arrived = output_shared(&shared, wanted, config.output_wait, &mut arrivals) => arrived,
+                taken = seats.wait_for(|seats| seats.holder > id.0) => {
+                    let holder = taken.context("the compositor thread is gone")?.holder;
+                    anyhow::bail!("client {holder} took the desktop");
+                }
+                () = peer_closed(writer.socket()) => anyhow::bail!("left while waiting for output {wanted}"),
+            };
+            if !arrived {
                 warn!("client {}: output {wanted} has not appeared; the desktop is the output shared meanwhile", id.0);
             }
         }
@@ -392,6 +409,17 @@ async fn output_shared(shared: &Shared, wanted: &str, wait: Duration, arrivals: 
     };
     let _ = tokio::time::timeout(wait, waiting).await;
     shared.displays().shares(FIRST, wanted)
+}
+
+/// Resolves when the peer has closed the connection or it has failed, and
+/// never for one that is still there. Nothing is read: bytes a client sent
+/// ahead of its ServerInit are the session's, and with those in the way the
+/// socket says no more until they are read, so this then waits for good.
+async fn peer_closed(socket: &TcpStream) {
+    if !matches!(socket.peek(&mut [0u8; 1]).await, Ok(1..)) {
+        return;
+    }
+    std::future::pending().await
 }
 
 async fn superseded(seats: &mut watch::Receiver<Seats>, id: ClientId, beside: bool) -> anyhow::Result<anyhow::Error> {
@@ -1637,6 +1665,33 @@ mod output_tests {
         arrive(&shared);
         let mut arrivals = shared.events.subscribe();
         assert!(output_shared(&shared, "HEADLESS-1", Duration::from_secs(30), &mut arrivals).await);
+    }
+
+    /// Both ends of a loopback connection: the client's, and the server's.
+    async fn connection() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_left_is_noticed_and_one_that_is_there_is_not() {
+        let (client, server) = connection().await;
+        assert!(tokio::time::timeout(Duration::from_millis(100), peer_closed(&server)).await.is_err());
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), peer_closed(&server)).await.unwrap();
+    }
+
+    /// Bytes sent ahead are not a peer leaving, and are still there to read.
+    #[tokio::test]
+    async fn bytes_sent_ahead_are_left_for_the_session() {
+        let (mut client, mut server) = connection().await;
+        client.write_all(b"x").await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(100), peer_closed(&server)).await.is_err());
+        let mut byte = [0u8; 1];
+        server.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"x");
     }
 
     #[tokio::test]

@@ -100,7 +100,9 @@ be the shared one: whatever follows the socket enables it, and the size the
 client is told first is that output's, not a monitor's it would have been shown
 for a moment and whose mode it cannot change. The wait ends the moment the
 output is shared and otherwise runs out, and the client starts on the output
-shared meanwhile. Enabling it is not the daemon's: a compositor reports a
+shared meanwhile. The desktop is held throughout, so the wait is also raced
+against the client closing its connection and against a later connection taking
+the desktop, either of which ends the session there. Enabling it is not the daemon's: a compositor reports a
 disabled head with no position, so a daemon enabling one through
 wlr-output-management would be choosing where it goes.
 
