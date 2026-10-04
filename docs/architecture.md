@@ -48,17 +48,19 @@ takes it, and the client that held it is disconnected with a message naming the
 one that took over — the same trade Windows Remote Desktop makes, and the reason
 the takeover happens *after* the handshake: an unauthenticated connection, or
 one whose login is refused, never displaces the session in progress. RFB's ClientInit
-shared flag is read and dropped; there is no configuration for it and no way to
-watch alongside somebody else.
+shared flag is read as nothing of the kind; there is no configuration for it and no way to
+watch alongside somebody else. The one connection that does not take the desktop
+is the client's own second, which shows it another output
+([A display beside](#a-display-beside)).
 
-The compositor thread holds the single client id, so the rule is one comparison:
-input, resize, density, output selection and clipboard from anyone else are
-dropped, which is what
+The compositor thread holds the client id of each of the two, so the rule is one
+comparison: input, resize, density, output selection and clipboard from anyone
+else are dropped, which is what
 a superseded session's last in-flight messages are. Taking over releases the
 keys and buttons the previous client held and its pending resize, and capture
 runs from the first handshake until the client on the desktop leaves.
 
-Who holds it is a `watch` and not one of the broadcast events: a session slow
+Who is where is a `watch` and not one of the broadcast events: a session slow
 enough to lag the broadcast drops events, and dropping this one would leave two
 clients on the desktop. A watch keeps only the latest value, so the superseded
 session ends on the value it finds there — and is ignored until it does.
@@ -497,6 +499,49 @@ and sent the new output's pixels. With no output left the capture stops and the
 list goes out empty, the last geometry and the last picture standing until an
 output appears; the first one to arrive is adopted the same way.
 
+### A display beside
+
+One framebuffer is one output and one connection is one framebuffer, so a client
+that wants two outputs at once connects twice. Its second connection finishes
+the same handshake, login included, and sends `0xB5` as its ClientInit byte
+where RFB has a shared flag. It then does not take the desktop: the client on
+it stays, and this connection is shown the first output the list has that the
+client is not on. Every other ClientInit value takes the desktop, RFB's `1`
+included.
+
+It is a whole RFB session over that output: its own framebuffer and capture,
+its own cursor session, a virtual pointer made against its output, its own
+encoding — VP9 with a walk of its own link, where it lists it — and its own
+resize and density, under the rules of the output it is on. Its ServerInit
+names that output's size, so it is sent only once the output is its own. The
+keyboard is the seat's, and keys from either connection reach whatever the
+compositor has focused; what each holds is let go when it leaves, and nothing
+the other holds. A key both hold goes up when the last of them lets go of it.
+The clipboard is the desktop's and is set by the client on
+it alone.
+
+What it may not do is choose. Which output is where is the client's on the
+desktop: the connection beside is sent an `OutputList` naming its own output
+as the shared one if it lists the extension, and its `SelectOutput` is answered
+with that list as it is. It ends, its socket closed, when
+
+- the client on the desktop leaves or is taken over — a display beside is that
+  client's, and a new client starts with none;
+- the client on the desktop selects the output it shows, since an output is on
+  one of them;
+- another connection asks to be beside, which takes its place;
+- the compositor takes its output away.
+
+One that asks with nobody on the desktop, or with no output the client is not
+on, is closed before ServerInit. So is one whose handshake finished after a
+later connection's display beside had already ended: it takes nobody's place.
+And so is one that connected before the client now on the desktop did: it was
+opened beside whoever was there before.
+There is one beside, so two outputs at once is
+the most a client is shown. The remotex gateway opens it for the second
+display's browser tab on *All Displays*, and lists on it the pixel encodings,
+the cursor, the size and the density and nothing else.
+
 Only a headless output is ever resized or rescaled, so switching to a real
 monitor leaves a client's resize and density requests answered *prohibited* —
 that monitor's mode belongs to the person sitting at it.
@@ -869,7 +914,8 @@ letting Shift go to make it produce `Tab` would type a plain Tab.
 Keys and buttons are let go when the client leaves or is superseded, and a
 connection that never finished the handshake releases nothing. Pointer events
 arrive in framebuffer pixels and are injected as absolute positions against the
-framebuffer's extent, which the virtual pointer maps onto the shared output.
+framebuffer's extent, which the virtual pointer maps onto the shared output — a
+pointer per connection, each on its own output, moving the seat's one cursor.
 Wheel "buttons" become discrete axis events, a notch apiece.
 
 A notch is all RFB can say, so a touchpad glide or two fingers on a phone would
@@ -950,7 +996,8 @@ list it.
 8- and 16-bit pixel formats and colour maps. Moving the client's pointer: the
 PointerPos pseudo-encoding would carry a warp the compositor made, and the
 cursor session does report positions, but only when the output repaints.
-Multiple outputs in one framebuffer — a client picks one of them instead. A
+Multiple outputs in one framebuffer — a client picks one of them, or connects
+again for another beside it. More than two outputs at once. A
 control socket. A microphone format beside the one the server names. A V4L2 camera device for the client's camera: a PipeWire node
 needs no kernel module and no privilege, at the cost of applications that open
 `/dev/video*` alone not seeing it. Camera formats beside I420, and scaling a

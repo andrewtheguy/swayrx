@@ -59,11 +59,6 @@ const RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct CursorCapture {
-    pub sources: Option<ExtOutputImageCaptureSourceManagerV1>,
-    pub manager: Option<ExtImageCopyCaptureManagerV1>,
-    /// The seat has named a pointer among its capabilities at least once, which
-    /// is what makes `wl_seat.get_pointer` legal.
-    pub seat_had_pointer: bool,
     /// The compositor stopped the session on the shared output: none is opened
     /// on it again, or every capture would reopen one only to see it stop.
     /// Sharing another output clears it.
@@ -72,7 +67,7 @@ pub struct CursorCapture {
     retry: Option<RegistrationToken>,
 }
 
-/// A cursor session on the shared output, with everything it was made from.
+/// A cursor session on a desk's shared output, with everything it was made from.
 struct Session {
     pointer: WlPointer,
     source: ExtImageCaptureSourceV1,
@@ -175,18 +170,18 @@ fn upright(rgba: Vec<u8>, width: u32, height: u32, transform: Transform) -> (Vec
 impl Compositor {
     /// Open a cursor session on the shared output, if a client is on the desktop,
     /// none is open, and the seat can hand over a pointer to open it with.
-    pub fn start_cursor(&mut self) {
-        if self.client.is_none() || self.cursor.session.is_some() || !self.cursor.seat_had_pointer || self.cursor.stopped {
+    pub fn start_cursor(&mut self, desk: usize) {
+        if self.desks[desk].client.is_none() || self.desks[desk].cursor.session.is_some() || !self.seat_had_pointer || self.desks[desk].cursor.stopped {
             return;
         }
-        let (Some(sources), Some(manager), Some(seat)) = (&self.cursor.sources, &self.cursor.manager, &self.seat) else { return };
-        let Some(output) = self.outputs.selected() else { return };
+        let (Some(sources), Some(manager), Some(seat)) = (&self.capture_sources, &self.image_copy, &self.seat) else { return };
+        let Some(output) = self.outputs.selected(desk) else { return };
         let pointer = seat.get_pointer(&self.qh, ());
         let source = sources.create_source(&output.output, &self.qh, ());
         let cursor = manager.create_pointer_cursor_session(&source, &pointer, &self.qh, ());
         let capture = cursor.get_capture_session(&self.qh, ());
         debug!("capturing the cursor of output {}", output.name.as_deref().unwrap_or_default());
-        self.cursor.session = Some(Session {
+        self.desks[desk].cursor.session = Some(Session {
             pointer,
             source,
             cursor,
@@ -206,27 +201,28 @@ impl Compositor {
     /// Close the cursor session, if one is open: nobody is watching, or the
     /// output it watches is no longer the shared one. The clients are told there
     /// is no pointer until a session says otherwise.
-    pub fn stop_cursor(&mut self) {
-        if let Some(token) = self.cursor.retry.take() {
+    pub fn stop_cursor(&mut self, desk: usize) {
+        if let Some(token) = self.desks[desk].cursor.retry.take() {
             self.handle.remove(token);
         }
-        if self.cursor.session.take().is_some() {
-            self.shared().set_cursor(None);
+        if self.desks[desk].cursor.session.take().is_some() {
+            self.shared().set_cursor(desk, None);
         }
     }
 
     /// Publish what a client should draw: the last image, while the cursor is on
     /// the output.
-    fn show_cursor(&self) {
-        let image = self.cursor.session.as_ref().filter(|s| s.entered).and_then(|s| s.image.clone());
-        self.shared().set_cursor(image);
+    fn show_cursor(&self, desk: usize) {
+        let image = self.desks[desk].cursor.session.as_ref().filter(|s| s.entered).and_then(|s| s.image.clone());
+        self.shared().set_cursor(desk, image);
     }
 
     /// Ask for the next cursor frame, if none is in flight and the session has
     /// said what to capture it into.
-    fn capture_cursor(&mut self) {
-        let Some(session) = &mut self.cursor.session else { return };
-        if session.frame.is_some() || self.cursor.retry.is_some() {
+    fn capture_cursor(&mut self, desk: usize) {
+        let cursor = &mut self.desks[desk].cursor;
+        let Some(session) = &mut cursor.session else { return };
+        if session.frame.is_some() || cursor.retry.is_some() {
             return;
         }
         let Some((width, height, format)) = session.constraints else { return };
@@ -253,16 +249,16 @@ impl Compositor {
     }
 
     /// Ask for the next cursor frame after [`RETRY`].
-    fn capture_cursor_later(&mut self) {
-        if self.cursor.retry.is_some() {
+    fn capture_cursor_later(&mut self, desk: usize) {
+        if self.desks[desk].cursor.retry.is_some() {
             return;
         }
-        match self.handle.insert_source(Timer::from_duration(RETRY), |_, _, state: &mut Compositor| {
-            state.cursor.retry = None;
-            state.capture_cursor();
+        match self.handle.insert_source(Timer::from_duration(RETRY), move |_, _, state: &mut Compositor| {
+            state.desks[desk].cursor.retry = None;
+            state.capture_cursor(desk);
             TimeoutAction::Drop
         }) {
-            Ok(token) => self.cursor.retry = Some(token),
+            Ok(token) => self.desks[desk].cursor.retry = Some(token),
             Err(e) => error!("cannot schedule a cursor capture: {e}"),
         }
     }
@@ -270,7 +266,8 @@ impl Compositor {
 
 impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for Compositor {
     fn event(state: &mut Self, capture: &ExtImageCopyCaptureSessionV1, event: ext_image_copy_capture_session_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
-        let Some(session) = state.cursor.session.as_mut().filter(|s| &s.capture == capture) else { return };
+        let Some(desk) = state.desks.iter().position(|d| d.cursor.session.as_ref().is_some_and(|s| &s.capture == capture)) else { return };
+        let session = state.desks[desk].cursor.session.as_mut().expect("found above");
         match event {
             ext_image_copy_capture_session_v1::Event::BufferSize { width, height } => session.size = (width, height),
             ext_image_copy_capture_session_v1::Event::ShmFormat { format: WEnum::Value(format) } => session.formats.push(format),
@@ -291,14 +288,14 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for Compositor {
                     return;
                 };
                 session.constraints = Some((width, height, format));
-                state.capture_cursor();
+                state.capture_cursor(desk);
             }
             ext_image_copy_capture_session_v1::Event::Stopped => {
                 // The source is gone, which is the output going: sharing the
                 // next one opens a session on that.
                 debug!("the cursor session stopped");
-                state.stop_cursor();
-                state.cursor.stopped = true;
+                state.stop_cursor(desk);
+                state.desks[desk].cursor.stopped = true;
             }
             _ => {}
         }
@@ -307,7 +304,8 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for Compositor {
 
 impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for Compositor {
     fn event(state: &mut Self, frame: &ExtImageCopyCaptureFrameV1, event: ext_image_copy_capture_frame_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
-        let Some(session) = state.cursor.session.as_mut().filter(|s| s.frame.as_ref() == Some(frame)) else { return };
+        let Some(desk) = state.desks.iter().position(|d| d.cursor.session.as_ref().is_some_and(|s| s.frame.as_ref() == Some(frame))) else { return };
+        let session = state.desks[desk].cursor.session.as_mut().expect("found above");
         match event {
             ext_image_copy_capture_frame_v1::Event::Transform { transform: WEnum::Value(t) } => session.transform = t,
             ext_image_copy_capture_frame_v1::Event::Ready => {
@@ -326,8 +324,8 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for Compositor {
                     None => debug!("the cursor paints nothing"),
                 }
                 session.image = image.map(Arc::new);
-                state.show_cursor();
-                state.capture_cursor();
+                state.show_cursor(desk);
+                state.capture_cursor(desk);
             }
             ext_image_copy_capture_frame_v1::Event::Failed { reason } => {
                 frame.destroy();
@@ -335,10 +333,10 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for Compositor {
                 match reason {
                     // The cursor changed size, and the session has announced
                     // the new one ahead of this failure.
-                    WEnum::Value(FailureReason::BufferConstraints) => state.capture_cursor(),
+                    WEnum::Value(FailureReason::BufferConstraints) => state.capture_cursor(desk),
                     reason => {
                         debug!("a cursor frame failed ({reason:?}); asking again in {RETRY:?}");
-                        state.capture_cursor_later();
+                        state.capture_cursor_later(desk);
                     }
                 }
             }
@@ -349,15 +347,16 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for Compositor {
 
 impl Dispatch<ExtImageCopyCaptureCursorSessionV1, ()> for Compositor {
     fn event(state: &mut Self, cursor: &ExtImageCopyCaptureCursorSessionV1, event: ext_image_copy_capture_cursor_session_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
-        let Some(session) = state.cursor.session.as_mut().filter(|s| &s.cursor == cursor) else { return };
+        let Some(desk) = state.desks.iter().position(|d| d.cursor.session.as_ref().is_some_and(|s| &s.cursor == cursor)) else { return };
+        let session = state.desks[desk].cursor.session.as_mut().expect("found above");
         match event {
             ext_image_copy_capture_cursor_session_v1::Event::Enter => {
                 session.entered = true;
-                state.show_cursor();
+                state.show_cursor(desk);
             }
             ext_image_copy_capture_cursor_session_v1::Event::Leave => {
                 session.entered = false;
-                state.show_cursor();
+                state.show_cursor(desk);
             }
             ext_image_copy_capture_cursor_session_v1::Event::Hotspot { x, y } => session.hotspot = (x, y),
             // The client places the pointer where it sent it.

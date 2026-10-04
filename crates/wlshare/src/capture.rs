@@ -4,7 +4,8 @@
 //! One frame is in flight at a time. `copy_with_damage` makes the compositor
 //! answer only when something changed since the frame before, so an idle desktop
 //! costs nothing and a busy one is paced by [`crate::config::Config::max_fps`].
-//! Capture runs only while a client is connected.
+//! Capture runs only while a client is connected, and each desk has a capture of
+//! its own, of its own output.
 //!
 //! The exception is a framebuffer holding no pixels yet -- freshly made, resized,
 //! or switched to another output. There is no frame before for damage to be
@@ -71,7 +72,6 @@ impl Drop for ShmBuffer {
 
 #[derive(Default)]
 pub struct Capture {
-    pub manager: Option<ZwlrScreencopyManagerV1>,
     frame: Option<ZwlrScreencopyFrameV1>,
     buffer: Option<ShmBuffer>,
     /// The frame the compositor announced, before its buffer is ready.
@@ -86,18 +86,15 @@ pub struct Capture {
 }
 
 impl Compositor {
-    /// Begin capturing if a client wants frames and nothing is in flight — the
-    /// cursor image beside the frames, on its own session.
-    pub fn start_capture(&mut self) {
-        self.start_cursor();
-        if self.client.is_none() || self.capture.frame.is_some() {
+    /// Begin capturing a desk's output if a client wants frames and nothing is
+    /// in flight — the cursor image beside the frames, on its own session.
+    pub fn start_capture(&mut self, desk: usize) {
+        self.start_cursor(desk);
+        if self.desks[desk].client.is_none() || self.desks[desk].capture.frame.is_some() {
             return;
         }
-        let Some(manager) = &self.capture.manager else { return };
-        let Some(output) = self.outputs.selected() else { return };
-        self.capture.damage.clear();
-        self.capture.layout = FrameLayout::default();
-        self.capture.announced = None;
+        let Some(manager) = &self.screencopy else { return };
+        let Some(output) = self.outputs.selected(desk) else { return };
         // Keep the compositor's pointer out of the framebuffer. wlroots 0.19
         // gives the headless backend a cursor plane, so a screencopy without
         // overlay_cursor can finally leave it behind; the plane's image is
@@ -105,72 +102,85 @@ impl Compositor {
         // pseudo-rectangle, so the client moves the pointer without waiting for
         // a captured frame.
         let frame = manager.capture_output(0, &output.output, &self.qh, ());
-        self.capture.frame = Some(frame);
+        let capture = &mut self.desks[desk].capture;
+        capture.damage.clear();
+        capture.layout = FrameLayout::default();
+        capture.announced = None;
+        capture.frame = Some(frame);
     }
 
     /// Stop after the frame in flight, if any: nobody is watching. The cursor
     /// session closes with it.
-    pub fn stop_capture(&mut self) {
-        self.stop_cursor();
-        if let Some(token) = self.capture.timer.take() {
+    pub fn stop_capture(&mut self, desk: usize) {
+        self.stop_cursor(desk);
+        let capture = &mut self.desks[desk].capture;
+        if let Some(token) = capture.timer.take() {
             self.handle.remove(token);
         }
-        if let Some(frame) = self.capture.frame.take() {
+        if let Some(frame) = capture.frame.take() {
             frame.destroy();
         }
-        self.capture.buffer = None;
-        self.capture.last_ready = None;
+        capture.buffer = None;
+        capture.last_ready = None;
     }
 
     /// Capture again after `delay`, replacing any timer already set.
-    fn capture_after(&mut self, delay: Duration) {
-        if let Some(token) = self.capture.timer.take() {
+    fn capture_after(&mut self, desk: usize, delay: Duration) {
+        if let Some(token) = self.desks[desk].capture.timer.take() {
             self.handle.remove(token);
         }
         let timer = if delay.is_zero() { Timer::immediate() } else { Timer::from_duration(delay) };
-        match self.handle.insert_source(timer, |_, _, state: &mut Compositor| {
-            state.capture.timer = None;
-            state.start_capture();
+        match self.handle.insert_source(timer, move |_, _, state: &mut Compositor| {
+            state.desks[desk].capture.timer = None;
+            state.start_capture(desk);
             TimeoutAction::Drop
         }) {
-            Ok(token) => self.capture.timer = Some(token),
+            Ok(token) => self.desks[desk].capture.timer = Some(token),
             Err(e) => error!("cannot schedule a capture: {e}"),
         }
     }
 
     /// The delay that keeps captures under the configured frame rate.
-    fn pace(&self) -> Duration {
+    fn pace(&self, desk: usize) -> Duration {
         let interval = Duration::from_secs_f64(1.0 / f64::from(self.max_fps));
-        match self.capture.last_ready {
+        match self.desks[desk].capture.last_ready {
             Some(at) => interval.saturating_sub(at.elapsed()),
             None => Duration::ZERO,
         }
     }
 
-    fn frame_ready(&mut self) {
-        let Some(buffer) = &self.capture.buffer else { return };
+    fn frame_ready(&mut self, desk: usize) {
+        let shared = self.shared().clone();
+        let state = &mut self.desks[desk];
+        let Some(buffer) = &state.capture.buffer else { return };
         let (width, height) = (buffer.width as u16, buffer.height as u16);
-        let origin = match self.pending_resize {
+        let origin = match state.pending_resize {
             Some((client, w, h)) if (w, h) == (width, height) => {
-                self.pending_resize = None;
+                state.pending_resize = None;
                 ResizeOrigin::Client(client)
             }
             _ => ResizeOrigin::Server,
         };
-        let damage = std::mem::take(&mut self.capture.damage);
+        let damage = std::mem::take(&mut state.capture.damage);
         let generation = {
-            let mut fb = self.shared().framebuffer.lock().unwrap();
+            let mut fb = shared.desks[desk].framebuffer.lock().unwrap();
             if (fb.width, fb.height) != (width, height) {
                 info!("the framebuffer is now {width}x{height} ({origin:?})");
                 fb.resize(width, height, origin);
             }
             let damage = damage_for(damage, fb.painted, width, height);
-            fb.apply(&buffer.map, buffer.stride as usize, &damage, self.capture.layout);
+            fb.apply(&buffer.map, buffer.stride as usize, &damage, state.capture.layout);
             fb.generation
         };
-        self.shared().frame_changed(generation);
-        self.capture.last_ready = Some(Instant::now());
-        self.capture.failures = 0;
+        shared.desks[desk].frame_changed(generation);
+        state.capture.last_ready = Some(Instant::now());
+        state.capture.failures = 0;
+    }
+
+    /// The desk whose frame in flight this is, or `None` for a frame destroyed
+    /// while its events were in flight.
+    fn frame_desk(&self, frame: &ZwlrScreencopyFrameV1) -> Option<usize> {
+        self.desks.iter().position(|desk| desk.capture.frame.as_ref() == Some(frame))
     }
 }
 
@@ -229,10 +239,7 @@ fn rank(format: wl_shm::Format) -> u8 {
 
 impl Dispatch<ZwlrScreencopyFrameV1, ()> for Compositor {
     fn event(state: &mut Self, frame: &ZwlrScreencopyFrameV1, event: zwlr_screencopy_frame_v1::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
-        if state.capture.frame.as_ref() != Some(frame) {
-            // A frame destroyed while its events were in flight.
-            return;
-        }
+        let Some(desk) = state.frame_desk(frame) else { return };
         match event {
             zwlr_screencopy_frame_v1::Event::Buffer { format, width, height, stride } => {
                 let WEnum::Value(format) = format else { return };
@@ -240,32 +247,32 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for Compositor {
                 // order this server may rely on. Keep the best one seen so far,
                 // and the first of them regardless -- an unusable format still
                 // has to reach the error below, which names it.
-                let better = state.capture.announced.is_none_or(|(.., current)| rank(format) > rank(current));
+                let better = state.desks[desk].capture.announced.is_none_or(|(.., current)| rank(format) > rank(current));
                 if better {
-                    state.capture.announced = Some((width, height, stride, format));
+                    state.desks[desk].capture.announced = Some((width, height, stride, format));
                 }
             }
             zwlr_screencopy_frame_v1::Event::BufferDone => {
-                let Some((width, height, stride, format)) = state.capture.announced else {
+                let Some((width, height, stride, format)) = state.desks[desk].capture.announced else {
                     warn!("the compositor offered no buffer format");
-                    state.capture_failed(frame);
+                    state.capture_failed(desk, frame);
                     return;
                 };
                 let Some(bytes) = channel_bytes(format) else {
                     error!("the compositor offers frames only as {format:?}; this server needs a 32-bit format at eight bits a channel: XRGB8888, XBGR8888, RGBX8888, BGRX8888 or one of their alpha spellings");
-                    state.capture_failed(frame);
+                    state.capture_failed(desk, frame);
                     return;
                 };
-                state.capture.layout.bytes = bytes;
-                if !state.capture.buffer.as_ref().is_some_and(|b| b.matches(width, height, stride, format)) {
+                state.desks[desk].capture.layout.bytes = bytes;
+                if !state.desks[desk].capture.buffer.as_ref().is_some_and(|b| b.matches(width, height, stride, format)) {
                     match ShmBuffer::new(&state.shm, qh, width, height, stride, format) {
                         Ok(b) => {
                             debug!("frame buffer {width}x{height}, stride {stride}, {format:?}");
-                            state.capture.buffer = Some(b);
+                            state.desks[desk].capture.buffer = Some(b);
                         }
                         Err(e) => {
                             error!("cannot allocate a {width}x{height} frame buffer: {e}");
-                            state.capture_failed(frame);
+                            state.capture_failed(desk, frame);
                             return;
                         }
                     }
@@ -280,10 +287,10 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for Compositor {
                 // pixels, and an idle output would never send the frame that
                 // resizes it.
                 let whole = {
-                    let fb = state.shared().framebuffer.lock().unwrap();
+                    let fb = state.shared().desks[desk].framebuffer.lock().unwrap();
                     !fb.painted || (fb.width, fb.height) != (width as u16, height as u16)
                 };
-                let buffer = state.capture.buffer.as_ref().unwrap();
+                let buffer = state.desks[desk].capture.buffer.as_ref().unwrap();
                 if whole {
                     debug!("asking for a whole {width}x{height} frame: the framebuffer holds no pixels at that size");
                     frame.copy(&buffer.buffer);
@@ -292,10 +299,10 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for Compositor {
                 }
             }
             zwlr_screencopy_frame_v1::Event::Flags { flags } => {
-                state.capture.layout.flipped = flags.into_result().is_ok_and(|f| f.contains(zwlr_screencopy_frame_v1::Flags::YInvert));
+                state.desks[desk].capture.layout.flipped = flags.into_result().is_ok_and(|f| f.contains(zwlr_screencopy_frame_v1::Flags::YInvert));
             }
             zwlr_screencopy_frame_v1::Event::Damage { x, y, width, height } => {
-                state.capture.damage.push(Rect {
+                state.desks[desk].capture.damage.push(Rect {
                     x: x.min(u32::from(u16::MAX)) as u16,
                     y: y.min(u32::from(u16::MAX)) as u16,
                     width: width.min(u32::from(u16::MAX)) as u16,
@@ -304,13 +311,13 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for Compositor {
             }
             zwlr_screencopy_frame_v1::Event::Ready { .. } => {
                 frame.destroy();
-                state.capture.frame = None;
-                state.frame_ready();
-                let delay = state.pace();
-                state.capture_after(delay);
+                state.desks[desk].capture.frame = None;
+                state.frame_ready(desk);
+                let delay = state.pace(desk);
+                state.capture_after(desk, delay);
             }
             zwlr_screencopy_frame_v1::Event::Failed => {
-                state.capture_failed(frame);
+                state.capture_failed(desk, frame);
             }
             _ => {}
         }
@@ -318,19 +325,19 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for Compositor {
 }
 
 impl Compositor {
-    fn capture_failed(&mut self, frame: &ZwlrScreencopyFrameV1) {
+    fn capture_failed(&mut self, desk: usize, frame: &ZwlrScreencopyFrameV1) {
         frame.destroy();
-        self.capture.frame = None;
-        self.capture.failures += 1;
+        self.desks[desk].capture.frame = None;
+        self.desks[desk].capture.failures += 1;
         // An output being reconfigured fails a frame or two; give up loudly only
         // when it keeps failing.
-        let delay = Duration::from_millis(100 * u64::from(self.capture.failures.min(20)));
-        if self.capture.failures == 20 {
+        let delay = Duration::from_millis(100 * u64::from(self.desks[desk].capture.failures.min(20)));
+        if self.desks[desk].capture.failures == 20 {
             error!("screen capture keeps failing; retrying every {delay:?}");
         } else {
             debug!("screen capture failed; retrying in {delay:?}");
         }
-        self.capture_after(delay);
+        self.capture_after(desk, delay);
     }
 }
 

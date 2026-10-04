@@ -17,12 +17,15 @@
 //! on its keycode under whatever the client holds, so Shift+Tab stays Shift+Tab
 //! even though the keycode's shifted level is ISO_Left_Tab, not Tab.
 //!
-//! One client is on the desktop at a time, so what is held is simply what it
-//! holds: a client leaving or being superseded lets go of all of it.
+//! The keyboard is the seat's, one for both desks, and what each desk's client
+//! holds on it is kept apart: a client leaving or being superseded lets go of
+//! its own keys and buttons, and of nothing the other holds. A key both hold
+//! is down until the last of them lets go of it.
 //!
 //! Pointer positions arrive in framebuffer pixels and go to the compositor as
 //! absolute positions against the framebuffer's extent, which the virtual
-//! pointer maps onto the shared output.
+//! pointer maps onto the output it was made for. So each desk has a pointer of
+//! its own, on its own output, while a client is on it.
 
 use std::collections::{HashMap, HashSet};
 use std::os::fd::AsFd;
@@ -115,8 +118,10 @@ struct Keys {
     keycodes: HashMap<u32, (u32, u32)>,
     /// The keycodes of the Shift keys, for pressing one and recognising any.
     shift_codes: Vec<u32>,
-    /// The keycodes the client holds.
+    /// The keycodes the clients hold between them.
     held: HashSet<u32>,
+    /// The keycodes each desk's client holds.
+    owners: [HashSet<u32>; 2],
     /// Keys pressed with Shift corrected around them.
     fixes: HashMap<u32, ShiftFix>,
     /// The transitions of the call under way.
@@ -125,11 +130,17 @@ struct Keys {
 
 pub struct Input {
     keyboard: ZwpVirtualKeyboardV1,
-    pointer: ZwlrVirtualPointerV1,
+    /// Each desk's pointer, while it has an output to point at.
+    pointers: [Option<Pointer>; 2],
     keys: Keys,
+    started: Instant,
+}
+
+/// A virtual pointer on one output.
+struct Pointer {
+    pointer: ZwlrVirtualPointerV1,
     /// The client's RFB button mask.
     buttons: u8,
-    started: Instant,
 }
 
 impl Keys {
@@ -155,7 +166,7 @@ impl Keys {
         if shift_codes.is_empty() {
             warn!("the keymap has no Shift key: case cannot be corrected");
         }
-        Self { modifiers: Modifiers::new(keymap), keycodes, shift_codes, held: HashSet::new(), fixes: HashMap::new(), sent: Vec::new() }
+        Self { modifiers: Modifiers::new(keymap), keycodes, shift_codes, held: HashSet::new(), owners: Default::default(), fixes: HashMap::new(), sent: Vec::new() }
     }
 
     /// A KeyEvent, as the transitions to send for it.
@@ -171,12 +182,54 @@ impl Keys {
             // A repeat goes out too: the state is as the first press left it,
             // and stays so -- see [`Modifiers`].
             self.send_key(code, true);
-        } else if self.held.remove(&code) {
+        } else {
+            self.let_go(code);
+        }
+        std::mem::take(&mut self.sent)
+    }
+
+    fn let_go(&mut self, code: u32) {
+        if self.held.remove(&code) {
             self.release(code);
         } else {
             // A release of something not held: the compositor counts the
             // state anyway, so send it as it is.
             self.send_key(code, false);
+        }
+    }
+
+    /// A desk's KeyEvent. The keyboard is one for both desks, so a key goes up
+    /// only once neither client holds it: a release from one, of a key the
+    /// other holds, is the other's to send.
+    fn desk_key(&mut self, desk: usize, keysym: u32, down: bool) -> Vec<Sent> {
+        if let Some(&(code, _)) = self.keycodes.get(&keysym) {
+            if down {
+                self.owners[desk].insert(code);
+            } else {
+                self.owners[desk].remove(&code);
+                if self.owned(code) {
+                    return Vec::new();
+                }
+            }
+        }
+        self.key(keysym, down)
+    }
+
+    fn owned(&self, code: u32) -> bool {
+        self.owners.iter().any(|held| held.contains(&code))
+    }
+
+    /// Let go of every key a desk's client left held, but for those the other
+    /// desk's holds too.
+    fn desk_left(&mut self, desk: usize) -> Vec<Sent> {
+        for code in std::mem::take(&mut self.owners[desk]) {
+            if !self.owned(code) {
+                self.let_go(code);
+            }
+        }
+        // With nobody holding a key, what a correction left down goes too.
+        if self.owners.iter().all(HashSet::is_empty) {
+            return self.release_all();
         }
         std::mem::take(&mut self.sent)
     }
@@ -272,9 +325,7 @@ impl Input {
     pub fn new(
         qh: &QueueHandle<Compositor>,
         keyboards: &ZwpVirtualKeyboardManagerV1,
-        pointers: &ZwlrVirtualPointerManagerV1,
         seat: &WlSeat,
-        output: &WlOutput,
         xkb_config: &Xkb,
     ) -> anyhow::Result<Self> {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
@@ -298,12 +349,10 @@ impl Input {
         let keyboard = keyboards.create_virtual_keyboard(seat, qh, ());
         keyboard.keymap(1, file.as_fd(), (text.len() + 1) as u32);
 
-        let pointer = pointers.create_virtual_pointer_with_output(Some(seat), Some(output), qh, ());
         Ok(Self {
             keyboard,
-            pointer,
+            pointers: [None, None],
             keys: Keys::new(&keymap),
-            buttons: 0,
             started: Instant::now(),
         })
     }
@@ -312,8 +361,8 @@ impl Input {
         self.started.elapsed().as_millis() as u32
     }
 
-    pub fn key(&mut self, keysym: u32, down: bool) {
-        let sent = self.keys.key(keysym, down);
+    pub fn key(&mut self, desk: usize, keysym: u32, down: bool) {
+        let sent = self.keys.desk_key(desk, keysym, down);
         self.send_keys(&sent);
     }
 
@@ -325,30 +374,23 @@ impl Input {
         }
     }
 
-    /// The button mask the compositor sees.
-    fn buttons_down(&self) -> u8 {
-        self.buttons & 7
-    }
-
     /// Press and release the buttons that changed, without a frame.
-    fn set_buttons(&mut self, before: u8, after: u8) {
-        let time = self.time();
+    fn set_buttons(pointer: &ZwlrVirtualPointerV1, time: u32, before: u8, after: u8) {
         for (bit, code) in [(1u8, BTN_LEFT), (2, BTN_MIDDLE), (4, BTN_RIGHT)] {
             let now = after & bit != 0;
             if now != (before & bit != 0) {
-                self.pointer.button(time, code, if now { wl_pointer::ButtonState::Pressed } else { wl_pointer::ButtonState::Released });
+                pointer.button(time, code, if now { wl_pointer::ButtonState::Pressed } else { wl_pointer::ButtonState::Released });
             }
         }
     }
 
     /// A PointerEvent: position in framebuffer pixels and the RFB button mask.
-    pub fn pointer(&mut self, buttons: u8, x: u16, y: u16, extent: (u16, u16)) {
+    pub fn pointer(&mut self, desk: usize, buttons: u8, x: u16, y: u16, extent: (u16, u16)) {
         let time = self.time();
-        self.pointer.motion_absolute(time, u32::from(x), u32::from(y), u32::from(extent.0.max(1)), u32::from(extent.1.max(1)));
-        let before = self.buttons_down();
-        let previous = std::mem::replace(&mut self.buttons, buttons);
-        let after = self.buttons_down();
-        self.set_buttons(before, after);
+        let Some(Pointer { pointer, buttons: held }) = &mut self.pointers[desk] else { return };
+        pointer.motion_absolute(time, u32::from(x), u32::from(y), u32::from(extent.0.max(1)), u32::from(extent.1.max(1)));
+        let previous = std::mem::replace(held, buttons);
+        Self::set_buttons(pointer, time, previous & 7, buttons & 7);
         // Wheel "buttons" scroll on the press; the release carries nothing.
         for (bit, axis, direction) in [
             (8u8, wl_pointer::Axis::VerticalScroll, -1.0),
@@ -357,11 +399,11 @@ impl Input {
             (64, wl_pointer::Axis::HorizontalScroll, 1.0),
         ] {
             if buttons & bit != 0 && previous & bit == 0 {
-                self.pointer.axis_source(wl_pointer::AxisSource::Wheel);
-                self.pointer.axis_discrete(time, axis, WHEEL_STEP * direction, direction as i32);
+                pointer.axis_source(wl_pointer::AxisSource::Wheel);
+                pointer.axis_discrete(time, axis, WHEEL_STEP * direction, direction as i32);
             }
         }
-        self.pointer.frame();
+        pointer.frame();
     }
 
     /// A Scroll: a distance in the output's logical pixels, the units an axis
@@ -369,40 +411,52 @@ impl Input {
     /// the compositor as a continuous source: a distance the applications
     /// spend as it is, the way they spend a touchpad's, rather than a count of
     /// notches.
-    pub fn scroll(&mut self, dx: i16, dy: i16) {
+    pub fn scroll(&mut self, desk: usize, dx: i16, dy: i16) {
         if dx == 0 && dy == 0 {
             return;
         }
         let time = self.time();
-        self.pointer.axis_source(wl_pointer::AxisSource::Continuous);
+        let Some(Pointer { pointer, .. }) = &self.pointers[desk] else { return };
+        pointer.axis_source(wl_pointer::AxisSource::Continuous);
         for (axis, pixels) in [(wl_pointer::Axis::VerticalScroll, dy), (wl_pointer::Axis::HorizontalScroll, dx)] {
             if pixels != 0 {
-                self.pointer.axis(time, axis, f64::from(pixels));
+                pointer.axis(time, axis, f64::from(pixels));
             }
         }
-        self.pointer.frame();
+        pointer.frame();
     }
 
-    /// Point the pointer at another output, for a client that asked for another
-    /// screen: `zwlr_virtual_pointer` takes an output when it is made and never
-    /// again, so the one bound to the old output is destroyed and a new one made
-    /// against the new one. Whatever the client holds is let go by the caller
-    /// first — a press cannot outlive the pointer that made it.
-    pub fn retarget(&mut self, qh: &QueueHandle<Compositor>, pointers: &ZwlrVirtualPointerManagerV1, seat: &WlSeat, output: &WlOutput) {
-        self.pointer.destroy();
-        self.pointer = pointers.create_virtual_pointer_with_output(Some(seat), Some(output), qh, ());
+    /// Point a desk's pointer at an output: the one its client is shown, at
+    /// first or after it asked for another. `zwlr_virtual_pointer` takes an
+    /// output when it is made and never again, so the one bound to the old
+    /// output is destroyed and a new one made against the new one. Whatever the
+    /// client holds is let go first — a press cannot outlive the pointer that
+    /// made it.
+    pub fn point(&mut self, desk: usize, qh: &QueueHandle<Compositor>, pointers: &ZwlrVirtualPointerManagerV1, seat: &WlSeat, output: &WlOutput) {
+        self.unpoint(desk);
+        let pointer = pointers.create_virtual_pointer_with_output(Some(seat), Some(output), qh, ());
+        self.pointers[desk] = Some(Pointer { pointer, buttons: 0 });
     }
 
-    /// Let go of everything the client left held.
-    pub fn release_all(&mut self) {
-        let sent = self.keys.release_all();
+    /// Take a desk's pointer away, with everything its client held.
+    pub fn unpoint(&mut self, desk: usize) {
+        self.release_all(desk);
+        if let Some(Pointer { pointer, .. }) = self.pointers[desk].take() {
+            pointer.destroy();
+        }
+    }
+
+    /// Let go of everything a desk's client left held.
+    pub fn release_all(&mut self, desk: usize) {
+        let time = self.time();
+        let sent = self.keys.desk_left(desk);
         self.send_keys(&sent);
-        let before = self.buttons_down();
-        self.buttons = 0;
-        let after = self.buttons_down();
-        if after != before {
-            self.set_buttons(before, after);
-            self.pointer.frame();
+        if let Some(Pointer { pointer, buttons }) = &mut self.pointers[desk] {
+            let before = std::mem::take(buttons) & 7;
+            if before != 0 {
+                Self::set_buttons(pointer, time, before, 0);
+                pointer.frame();
+            }
         }
     }
 }
@@ -417,6 +471,7 @@ mod tests {
     use xkbcommon::xkb;
 
     use super::{EVDEV_OFFSET, Keys, Modifiers, Sent, is_character};
+    use crate::shared::{BESIDE, FIRST};
 
     /// The evdev codes of Left Shift, Left Control, Left Alt and Left Meta.
     const MODIFIER_KEYS: [u32; 4] = [42, 29, 56, 125];
@@ -478,6 +533,36 @@ mod tests {
         keys.key(XK_SHIFT_L, true);
         assert_eq!(wire(keys.key(XK_SHIFT_L, false)), [(SHIFT, false, 0)]);
         assert_eq!(wire(keys.key(XK_UPPER_A, false)), [(A, false, 0)]);
+    }
+
+    #[test]
+    fn a_key_both_desks_hold_goes_up_with_the_last_of_them() {
+        let mut keys = Keys::new(&keymap());
+        assert_eq!(wire(keys.desk_key(FIRST, XK_TAB, true)), [(TAB, true, 0)]);
+        // The second press of a key already down is a repeat.
+        assert_eq!(wire(keys.desk_key(BESIDE, XK_TAB, true)), [(TAB, true, 0)]);
+        assert_eq!(wire(keys.desk_key(FIRST, XK_TAB, false)), []);
+        assert_eq!(wire(keys.desk_key(BESIDE, XK_TAB, false)), [(TAB, false, 0)]);
+    }
+
+    #[test]
+    fn a_release_from_a_desk_that_never_held_the_key_leaves_the_other_its_key() {
+        let mut keys = Keys::new(&keymap());
+        keys.desk_key(FIRST, XK_SHIFT_L, true);
+        assert_eq!(wire(keys.desk_key(BESIDE, XK_SHIFT_L, false)), []);
+        assert_eq!(wire(keys.desk_left(BESIDE)), []);
+        // The Shift is still down for the client that holds it.
+        assert_eq!(wire(keys.desk_key(FIRST, XK_TAB, true)), [(TAB, true, SHIFT_MASK)]);
+    }
+
+    #[test]
+    fn a_desk_leaving_lets_go_of_what_only_it_held() {
+        let mut keys = Keys::new(&keymap());
+        keys.desk_key(FIRST, XK_SHIFT_L, true);
+        keys.desk_key(BESIDE, XK_SHIFT_L, true);
+        keys.desk_key(BESIDE, XK_TAB, true);
+        assert_eq!(wire(keys.desk_left(BESIDE)), [(TAB, false, SHIFT_MASK)]);
+        assert_eq!(wire(keys.desk_left(FIRST)), [(SHIFT, false, 0)]);
     }
 
     fn depressed(modifiers: &Modifiers) -> u32 {

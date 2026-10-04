@@ -34,7 +34,24 @@ use crate::framebuffer::Framebuffer;
 use crate::input::Input;
 use crate::framebuffer::ResizeOrigin;
 use crate::outputs::{ConfigKind, OutputInfo, Outputs};
-use crate::shared::{ClientId, Command, Displays, Event, Geometry, Shared};
+use crate::shared::{BESIDE, ClientId, Command, Displays, Event, FIRST, Geometry, Shared};
+
+/// What the compositor thread keeps for one desk: who is on it, and what
+/// shares its output with them.
+#[derive(Default)]
+pub struct DeskState {
+    /// The client on this desk. The first desk's is the one on the desktop: a
+    /// connection that finishes the handshake takes it from whoever holds it.
+    pub client: Option<ClientId>,
+    pub capture: Capture,
+    pub cursor: CursorCapture,
+    /// The client's SetDesktopSize the compositor accepted, until the frame at
+    /// that size arrives.
+    pub pending_resize: Option<(ClientId, u16, u16)>,
+    /// A declaration that arrived while another's configuration was out, run
+    /// once that one settles: client, width, height, scale.
+    queued_declaration: Option<(ClientId, u16, u16, f64)>,
+}
 
 pub struct Compositor {
     shared: Option<Arc<Shared>>,
@@ -46,19 +63,16 @@ pub struct Compositor {
     keyboards: Option<ZwpVirtualKeyboardManagerV1>,
     pointers: Option<ZwlrVirtualPointerManagerV1>,
     pub outputs: Outputs,
-    pub capture: Capture,
-    pub cursor: CursorCapture,
+    pub screencopy: Option<ZwlrScreencopyManagerV1>,
+    pub capture_sources: Option<ExtOutputImageCaptureSourceManagerV1>,
+    pub image_copy: Option<ExtImageCopyCaptureManagerV1>,
+    /// The seat has named a pointer among its capabilities at least once, which
+    /// is what makes `wl_seat.get_pointer` legal.
+    pub seat_had_pointer: bool,
+    /// [`FIRST`] and [`BESIDE`].
+    pub desks: [DeskState; 2],
     input: Option<Input>,
     pub clipboard: Clipboard,
-    /// The one client on the desktop. A connection that finishes the handshake
-    /// takes it from whoever holds it.
-    pub client: Option<ClientId>,
-    /// A client's SetDesktopSize the compositor accepted, until the frame at that
-    /// size arrives.
-    pub pending_resize: Option<(ClientId, u16, u16)>,
-    /// A declaration that arrived while another's configuration was out, run
-    /// once that one settles: client, width, height, scale.
-    queued_declaration: Option<(ClientId, u16, u16, f64)>,
     pub max_fps: u32,
     resize_allowed: bool,
     xkb: Xkb,
@@ -193,13 +207,13 @@ fn connect(handle: LoopHandle<'static, Compositor>, max_fps: u32, resize: bool, 
         keyboards,
         pointers,
         outputs: Outputs::default(),
-        capture: Capture::default(),
-        cursor: CursorCapture::default(),
+        screencopy,
+        capture_sources,
+        image_copy,
+        seat_had_pointer: false,
+        desks: Default::default(),
         input: None,
         clipboard: Clipboard::default(),
-        client: None,
-        pending_resize: None,
-        queued_declaration: None,
         max_fps,
         resize_allowed: resize,
         xkb,
@@ -207,9 +221,6 @@ fn connect(handle: LoopHandle<'static, Compositor>, max_fps: u32, resize: bool, 
         exit: None,
     };
     compositor.outputs.manager = output_manager;
-    compositor.capture.manager = screencopy;
-    compositor.cursor.sources = capture_sources;
-    compositor.cursor.manager = image_copy;
     compositor.clipboard.manager = data_control;
     for global in globals.contents().clone_list() {
         if global.interface == "wl_output" {
@@ -249,16 +260,18 @@ impl Compositor {
         queue.roundtrip(self).context("learning the outputs")?;
         queue.roundtrip(self).context("learning the outputs")?;
         self.outputs.select(wanted)?;
-        let (width, height) = self.outputs.size();
+        let (width, height) = self.outputs.size(FIRST);
         anyhow::ensure!(width > 0 && height > 0, "the shared output has no mode");
-        let geometry = Geometry { width, height, scale: self.outputs.scale() };
-        let displays = Displays { active: self.outputs.active_id(), entries: self.outputs.entries() };
+        let geometry = Geometry { width, height, scale: self.outputs.scale(FIRST) };
+        let displays = Displays { active: [self.outputs.active_id(FIRST), 0], entries: self.outputs.entries() };
         let shared = Arc::new(Shared::new(Framebuffer::new(width, height), geometry, displays, commands));
         self.shared = Some(shared);
 
         if let (Some(seat), Some(keyboards), Some(pointers)) = (&self.seat, &self.keyboards, &self.pointers) {
-            let output = self.outputs.selected().expect("selected").output.clone();
-            self.input = Some(Input::new(&self.qh, keyboards, pointers, seat, &output, &self.xkb)?);
+            let output = self.outputs.selected(FIRST).expect("selected").output.clone();
+            let mut input = Input::new(&self.qh, keyboards, seat, &self.xkb)?;
+            input.point(FIRST, &self.qh, pointers, seat, &output);
+            self.input = Some(input);
         }
         if let Some(seat) = &self.seat {
             self.clipboard.attach(&self.qh, seat);
@@ -266,19 +279,25 @@ impl Compositor {
         Ok((conn, queue))
     }
 
-    /// Refresh the shared geometry from the outputs; tell the sessions if it
-    /// changed.
-    pub fn geometry_changed(&mut self) {
-        if self.refresh_geometry() {
-            self.shared().emit(Event::Geometry { to: None });
+    /// The desk a client is on, or `None` for one that never joined or was
+    /// superseded: its last messages arrive after it lost its desk.
+    pub fn desk_of(&self, client: ClientId) -> Option<usize> {
+        self.desks.iter().position(|desk| desk.client == Some(client))
+    }
+
+    /// Refresh a desk's shared geometry from the outputs; tell the sessions if
+    /// it changed.
+    pub fn geometry_changed(&mut self, desk: usize) {
+        if self.refresh_geometry(desk) {
+            self.shared().emit(Event::Geometry { desk, to: None });
         }
     }
 
-    /// Refresh the shared geometry and report it whether or not it changed: a
-    /// declaration is owed an answer.
-    pub fn answer_geometry(&mut self, to: Option<ClientId>) {
-        self.refresh_geometry();
-        self.shared().emit(Event::Geometry { to });
+    /// Refresh a desk's shared geometry and report it whether or not it
+    /// changed: a declaration is owed an answer.
+    pub fn answer_geometry(&mut self, desk: usize, to: Option<ClientId>) {
+        self.refresh_geometry(desk);
+        self.shared().emit(Event::Geometry { desk, to });
     }
 
     /// Refresh the list of outputs; tell the sessions if it changed. A no-op
@@ -301,7 +320,7 @@ impl Compositor {
     }
 
     fn refresh_displays(&mut self) -> bool {
-        let now = Displays { active: self.outputs.active_id(), entries: self.outputs.entries() };
+        let now = Displays { active: [self.outputs.active_id(FIRST), self.outputs.active_id(BESIDE)], entries: self.outputs.entries() };
         let mut displays = self.shared().displays.lock().unwrap();
         if *displays == now {
             return false;
@@ -310,11 +329,11 @@ impl Compositor {
         true
     }
 
-    fn refresh_geometry(&mut self) -> bool {
-        let (width, height) = self.outputs.size();
-        let scale = self.outputs.scale();
+    fn refresh_geometry(&mut self, desk: usize) -> bool {
+        let (width, height) = self.outputs.size(desk);
+        let scale = self.outputs.scale(desk);
         let now = Geometry { width, height, scale };
-        let mut g = self.shared().geometry.lock().unwrap();
+        let mut g = self.shared().desks[desk].geometry.lock().unwrap();
         if *g == now {
             return false;
         }
@@ -326,72 +345,76 @@ impl Compositor {
     fn handle_command(&mut self, command: Command) {
         match command {
             Command::ClientJoined(id) => {
-                if let Some(previous) = self.client.replace(id) {
+                if let Some(previous) = self.desks[FIRST].client.replace(id) {
                     info!("client {} takes the desktop from client {}", id.0, previous.0);
-                    self.let_go(previous);
+                    self.let_go(FIRST, previous);
+                    // A display beside the client that held it was that client's.
+                    self.end_beside();
                 }
-                self.shared().set_active(Some(id));
-                self.start_capture();
+                self.shared().set_holder(Some(id));
+                self.start_capture(FIRST);
             }
+            Command::BesideJoined(id) => self.join_beside(id),
             Command::ClientLeft(id) => {
                 // A connection that never joined, or one already superseded,
                 // holds nothing.
-                if self.client != Some(id) {
-                    return;
+                match self.desk_of(id) {
+                    Some(FIRST) => {
+                        self.end_beside();
+                        self.desks[FIRST].client = None;
+                        self.shared().set_holder(None);
+                        self.let_go(FIRST, id);
+                        self.stop_capture(FIRST);
+                    }
+                    Some(_) => self.end_beside(),
+                    None => {}
                 }
-                self.client = None;
-                self.shared().set_active(None);
-                self.let_go(id);
-                self.stop_capture();
             }
-            // Everything below is the desktop's, so only the client holding it
-            // is heard: a superseded session's last messages arrive after the
-            // new client has taken over.
+            // Everything below is a desk's, so only the client on one is heard:
+            // a superseded session's last messages arrive after the new client
+            // has taken over.
             Command::Key { client, keysym, down } => {
-                if self.client != Some(client) {
-                    return;
-                }
+                let Some(desk) = self.desk_of(client) else { return };
                 if let Some(input) = &mut self.input {
-                    input.key(keysym, down);
+                    input.key(desk, keysym, down);
                 }
             }
             Command::Pointer { client, buttons, x, y } => {
-                if self.client != Some(client) {
-                    return;
-                }
+                let Some(desk) = self.desk_of(client) else { return };
                 let extent = {
-                    let fb = self.shared().framebuffer.lock().unwrap();
+                    let fb = self.shared().desks[desk].framebuffer.lock().unwrap();
                     (fb.width, fb.height)
                 };
                 if let Some(input) = &mut self.input {
-                    input.pointer(buttons, x, y, extent);
+                    input.pointer(desk, buttons, x, y, extent);
                 }
             }
             Command::Scroll { client, dx, dy } => {
-                if self.client != Some(client) {
-                    return;
-                }
+                let Some(desk) = self.desk_of(client) else { return };
                 if let Some(input) = &mut self.input {
-                    input.scroll(dx, dy);
+                    input.scroll(desk, dx, dy);
                 }
             }
             Command::Resize { client, width, height } => {
-                if self.client == Some(client) {
-                    self.resize(client, width, height);
+                if let Some(desk) = self.desk_of(client) {
+                    self.resize(desk, client, width, height);
                 }
             }
             Command::Declare { client, width, height, scale } => {
-                if self.client == Some(client) {
-                    self.declare(client, width, height, scale);
+                if let Some(desk) = self.desk_of(client) {
+                    self.declare(desk, client, width, height, scale);
                 }
             }
-            Command::SelectOutput { client, id } => {
-                if self.client == Some(client) {
-                    self.select_output(client, id);
-                }
-            }
+            // Which output is where is the choice of the client on the desktop:
+            // a display beside is answered with the list as it is.
+            Command::SelectOutput { client, id } => match self.desk_of(client) {
+                Some(FIRST) => self.select_output(client, id),
+                Some(_) => self.answer_outputs(),
+                None => {}
+            },
+            // The clipboard is the desktop's, and so its one client's.
             Command::SetClipboard { client, text } => {
-                if self.client == Some(client) {
+                if self.desks[FIRST].client == Some(client) {
                     let text: Arc<str> = Arc::from(text);
                     self.shared().set_clipboard(text.clone(), false);
                     self.clipboard.set(&self.qh.clone(), text);
@@ -401,16 +424,75 @@ impl Compositor {
     }
 
     /// Let go of everything a client held, whether it left or was superseded.
-    fn let_go(&mut self, id: ClientId) {
-        if self.pending_resize.is_some_and(|(c, _, _)| c == id) {
-            self.pending_resize = None;
+    fn let_go(&mut self, desk: usize, id: ClientId) {
+        let state = &mut self.desks[desk];
+        if state.pending_resize.is_some_and(|(c, _, _)| c == id) {
+            state.pending_resize = None;
         }
+        state.queued_declaration = None;
         if let Some(input) = &mut self.input {
-            input.release_all();
+            input.release_all(desk);
         }
     }
 
-    fn resize(&mut self, client: ClientId, width: u16, height: u16) {
+    /// A connection asks to show another output beside the client on the
+    /// desktop: the first the list shows that this client is not on. It takes
+    /// the place of a connection already beside. With nobody on the desktop, or
+    /// no other output, it is ended instead.
+    ///
+    /// Handshakes finish out of order, so the connection asking may be older
+    /// than one already ended. Its session would end the moment it was seated,
+    /// so it is refused, and whoever is beside stays. One older than the client
+    /// on the desktop was opened beside whoever was there before, and a display
+    /// beside is its client's: it is refused too.
+    fn join_beside(&mut self, id: ClientId) {
+        if self.shared().seats.borrow().beside_ended >= id.0 {
+            info!("client {}: a later connection beside has already ended", id.0);
+            return self.shared().end_beside(id);
+        }
+        let Some(holder) = self.desks[FIRST].client else {
+            info!("client {}: nobody is on the desktop to be beside", id.0);
+            return self.shared().end_beside(id);
+        };
+        if holder.0 > id.0 {
+            info!("client {}: client {} took the desktop since it connected", id.0, holder.0);
+            return self.shared().end_beside(id);
+        }
+        self.end_beside();
+        let first = self.outputs.selected[FIRST].clone();
+        let Some(entry) = self.outputs.entries().into_iter().find(|entry| Some(&entry.name) != first.as_ref()) else {
+            info!("client {}: no other output to show beside", id.0);
+            return self.shared().end_beside(id);
+        };
+        let Some(output) = self.outputs.selectable(entry.id) else { return self.shared().end_beside(id) };
+        let wl_output = output.output.clone();
+        info!("client {}: showing output {} beside: {}x{} pixels at scale {:.2}", id.0, entry.name, entry.width, entry.height, entry.scale);
+        self.desks[BESIDE].client = Some(id);
+        self.share_output(BESIDE, entry.name, entry.width, entry.height, &wl_output);
+        // After the framebuffer took the output's size: the session reads it
+        // for its ServerInit once it sees itself here.
+        self.shared().set_beside(id);
+    }
+
+    /// End the display beside, if there is one: its client left, the client on
+    /// the desktop left or took its output, or the output went away. Its
+    /// session ends, and its framebuffer is given back.
+    fn end_beside(&mut self) {
+        let Some(id) = self.desks[BESIDE].client.take() else { return };
+        info!("client {} is no longer beside", id.0);
+        self.shared().end_beside(id);
+        self.let_go(BESIDE, id);
+        self.stop_capture(BESIDE);
+        if let Some(input) = &mut self.input {
+            input.unpoint(BESIDE);
+        }
+        self.desks[BESIDE].cursor.stopped = false;
+        self.outputs.selected[BESIDE] = None;
+        self.shared().desks[BESIDE].framebuffer.lock().unwrap().resize(1, 1, ResizeOrigin::Server);
+        self.outputs_changed();
+    }
+
+    fn resize(&mut self, desk: usize, client: ClientId, width: u16, height: u16) {
         let refuse = |this: &Self, status: u16| this.shared().emit(Event::ResizeRefused { client, status });
         if !self.resize_allowed {
             info!("client {} asked for {width}x{height}: resizing is disabled", client.0);
@@ -420,15 +502,16 @@ impl Compositor {
             return refuse(self, wlshare_rfb::msg::EDS_STATUS_INVALID_LAYOUT);
         }
         info!("client {} asks for a {width}x{height} desktop", client.0);
-        self.pending_resize = Some((client, width, height));
+        self.desks[desk].pending_resize = Some((client, width, height));
         let qh = self.qh.clone();
-        if !self.outputs.configure(&qh, Some((width, height)), None, ConfigKind::Resize { client }) {
-            self.pending_resize = None;
+        if !self.outputs.configure(&qh, desk, Some((width, height)), None, ConfigKind::Resize { client }) {
+            self.desks[desk].pending_resize = None;
             refuse(self, wlshare_rfb::msg::EDS_STATUS_PROHIBITED);
         }
     }
 
-    /// Share another output: the client named one from the list it was sent.
+    /// Share another output: the client on the desktop named one from the list
+    /// it was sent.
     ///
     /// The capture stops, the virtual pointer moves with it — absolute positions
     /// are against the new output's extent — and the framebuffer takes the new
@@ -446,34 +529,41 @@ impl Compositor {
             return self.answer_outputs();
         };
         let name = output.name.clone().expect("selectable");
-        if self.outputs.selected.as_deref() == Some(name.as_str()) {
+        if self.outputs.selected[FIRST].as_deref() == Some(name.as_str()) {
             debug!("client {}: output {name} is already the shared one", client.0);
             return self.answer_outputs();
         }
         let (width, height) = self.outputs.size_of(output);
         let wl_output = output.output.clone();
         info!("client {}: sharing output {name}: {width}x{height} pixels at scale {:.2}", client.0, self.outputs.scale_of(output));
-        self.share_output(name, width, height, &wl_output);
+        self.share_output(FIRST, name, width, height, &wl_output);
     }
 
-    /// Take an output as the shared one and start the desktop again on it. The
-    /// whole sequence, whoever asked for it: a client naming one from its list,
-    /// or the compositor taking the one being shared away.
-    fn share_output(&mut self, name: String, width: u16, height: u16, output: &WlOutput) {
-        self.stop_capture();
+    /// Take an output as a desk's shared one and start the desk again on it.
+    /// The whole sequence, whoever asked for it: a client naming one from its
+    /// list, the compositor taking the one being shared away, or a connection
+    /// joining beside.
+    ///
+    /// An output is on one desk: where the client on the desktop goes, a
+    /// display beside that was showing it ends.
+    fn share_output(&mut self, desk: usize, name: String, width: u16, height: u16, output: &WlOutput) {
+        if desk == FIRST && self.outputs.selected[BESIDE].as_deref() == Some(name.as_str()) {
+            self.end_beside();
+        }
+        self.stop_capture(desk);
         // A resize accepted for the output being left is not this one's, nor is
         // a cursor session the compositor stopped there.
-        self.pending_resize = None;
-        self.cursor.stopped = false;
-        self.outputs.selected = Some(name);
+        self.desks[desk].pending_resize = None;
+        self.desks[desk].cursor.stopped = false;
+        self.outputs.selected[desk] = Some(name);
         {
-            let mut fb = self.shared().framebuffer.lock().unwrap();
+            let mut fb = self.shared().desks[desk].framebuffer.lock().unwrap();
             fb.resize(width, height, ResizeOrigin::Server);
         }
-        self.retarget_input(output);
-        self.geometry_changed();
+        self.retarget_input(desk, output);
+        self.geometry_changed(desk);
         self.answer_outputs();
-        self.start_capture();
+        self.start_capture(desk);
     }
 
     /// Share whatever output is left, there being none shared: the one that was
@@ -492,73 +582,92 @@ impl Compositor {
         }
         let Some(entry) = self.outputs.entries().into_iter().next() else {
             warn!("no output is left to share; the capture stops until one appears");
-            self.stop_capture();
+            self.stop_capture(FIRST);
             return self.answer_outputs();
         };
         let Some(output) = self.outputs.selectable(entry.id) else { return };
         let wl_output = output.output.clone();
         info!("sharing output {}: {}x{} pixels at scale {:.2}", entry.name, entry.width, entry.height, entry.scale);
-        self.share_output(entry.name, entry.width, entry.height, &wl_output);
+        self.share_output(FIRST, entry.name, entry.width, entry.height, &wl_output);
     }
 
-    /// Point the virtual pointer at another output. What the client holds is let
-    /// go first: a press cannot outlive the pointer that made it.
-    fn retarget_input(&mut self, output: &WlOutput) {
+    /// The output a desk shared went away. The first desk moves to whatever is
+    /// left; a display beside ends.
+    fn output_gone(&mut self, desk: usize) {
+        if desk == FIRST {
+            // The name would otherwise stand for an output the compositor no
+            // longer has, which leaves nothing selected, the capture stopped and
+            // nothing left to start it again -- a client on a picture that has
+            // quietly stopped changing.
+            self.outputs.selected[FIRST] = None;
+            self.adopt_output();
+        } else {
+            self.end_beside();
+        }
+    }
+
+    /// Point a desk's virtual pointer at another output. What the client holds
+    /// is let go first: a press cannot outlive the pointer that made it.
+    fn retarget_input(&mut self, desk: usize, output: &WlOutput) {
         let (Some(input), Some(pointers), Some(seat)) = (&mut self.input, &self.pointers, &self.seat) else { return };
-        input.release_all();
-        input.retarget(&self.qh, pointers, seat, output);
+        input.point(desk, &self.qh, pointers, seat, output);
     }
 
-    /// Follow a client's density: the output's mode and scale in one
+    /// Follow a client's density: its desk's output's mode and scale in one
     /// configuration, so every application on it redraws once. Only what differs
     /// is asked for, and a declaration that changes nothing, or cannot change
     /// anything, is answered at once with the output as it is.
     ///
     /// One declaration's configuration is out at a time, so each settles on its
     /// own and is answered once. One arriving meanwhile waits for that one to
-    /// settle; a newer one replaces it, and the one replaced is answered with
-    /// the output as it is.
-    fn declare(&mut self, client: ClientId, width: u16, height: u16, scale: f64) {
+    /// settle; a newer one from the same desk replaces it, and the one replaced
+    /// is answered with the output as it is.
+    fn declare(&mut self, desk: usize, client: ClientId, width: u16, height: u16, scale: f64) {
         if self.outputs.declaring.is_some() {
             debug!("client {}: a declaration waits for the one before it to settle", client.0);
-            if let Some((waiting, ..)) = self.queued_declaration.replace((client, width, height, scale)) {
-                self.answer_geometry(Some(waiting));
+            if let Some((waiting, ..)) = self.desks[desk].queued_declaration.replace((client, width, height, scale)) {
+                self.answer_geometry(desk, Some(waiting));
             }
             return;
         }
-        let current = self.outputs.scale();
-        let current_size = self.outputs.size();
+        let current = self.outputs.scale(desk);
+        let current_size = self.outputs.size(desk);
         let new_scale = ((current - scale).abs() >= 0.005).then_some(scale);
         let new_size = ((width, height) != current_size).then_some((width, height));
         if new_scale.is_none() && new_size.is_none() {
-            return self.answer_geometry(Some(client));
+            return self.answer_geometry(desk, Some(client));
         }
         if !self.resize_allowed {
             info!("not following client {}'s density {scale:.2} at {width}x{height}: resizing is disabled", client.0);
-            return self.answer_geometry(Some(client));
+            return self.answer_geometry(desk, Some(client));
         }
         info!(
             "following client {}'s density: output {}x{} at scale {current:.2} -> {width}x{height} at scale {scale:.2}",
             client.0, current_size.0, current_size.1
         );
         // The frame at the new size is this client's resize, as a SetDesktopSize's is.
-        self.pending_resize = new_size.map(|(w, h)| (client, w, h));
+        self.desks[desk].pending_resize = new_size.map(|(w, h)| (client, w, h));
         let qh = self.qh.clone();
         let id = self.outputs.next_declaration;
         self.outputs.next_declaration += 1;
-        if !self.outputs.configure(&qh, new_size, new_scale, ConfigKind::Declare { id }) {
-            self.pending_resize = None;
-            self.answer_geometry(Some(client));
+        if !self.outputs.configure(&qh, desk, new_size, new_scale, ConfigKind::Declare { id }) {
+            self.desks[desk].pending_resize = None;
+            self.answer_geometry(desk, Some(client));
         }
     }
 
-    /// The declaration out has been answered: run the one waiting, if its
-    /// client still holds the desktop.
+    /// The declaration out has been answered: run one that waited, if its
+    /// client is still on its desk.
     pub fn declaration_settled(&mut self) {
-        if let Some((client, width, height, scale)) = self.queued_declaration.take()
-            && self.client == Some(client)
-        {
-            self.declare(client, width, height, scale);
+        for desk in [FIRST, BESIDE] {
+            if self.outputs.declaring.is_some() {
+                return;
+            }
+            if let Some((client, width, height, scale)) = self.desks[desk].queued_declaration.take()
+                && self.desks[desk].client == Some(client)
+            {
+                self.declare(desk, client, width, height, scale);
+            }
         }
     }
 }
@@ -575,18 +684,15 @@ impl Dispatch<WlRegistry, GlobalListContents> for Compositor {
                     let removed = state.outputs.outputs.remove(i);
                     // An output with no name yet is nobody's selection, not even
                     // when nothing is selected.
-                    let was_selected = removed.name.as_deref().is_some_and(|n| state.outputs.selected.as_deref() == Some(n));
-                    warn!("output {} went away{}", removed.name.unwrap_or_default(), if was_selected { "; it is the shared one" } else { "" });
+                    let desks = state.outputs.desks_on(removed.name.as_deref());
+                    warn!("output {} went away{}", removed.name.unwrap_or_default(), if desks.is_empty() { "" } else { "; it is a shared one" });
                     removed.output.release();
-                    if !was_selected {
+                    if desks.is_empty() {
                         return state.outputs_changed();
                     }
-                    // The name would otherwise stand for an output the compositor
-                    // no longer has, which leaves nothing selected, the capture
-                    // stopped and nothing left to start it again -- a client on a
-                    // picture that has quietly stopped changing.
-                    state.outputs.selected = None;
-                    state.adopt_output();
+                    for desk in desks {
+                        state.output_gone(desk);
+                    }
                 }
             }
             _ => {}
@@ -600,11 +706,12 @@ impl Dispatch<WlSeat, ()> for Compositor {
         // whatever the seat has at the moment.
         if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(capabilities) } = event
             && capabilities.contains(wl_seat::Capability::Pointer)
-            && !state.cursor.seat_had_pointer
+            && !state.seat_had_pointer
         {
             debug!("the seat has a pointer: the cursor image can be captured");
-            state.cursor.seat_had_pointer = true;
-            state.start_cursor();
+            state.seat_had_pointer = true;
+            state.start_cursor(FIRST);
+            state.start_cursor(BESIDE);
         }
     }
 }

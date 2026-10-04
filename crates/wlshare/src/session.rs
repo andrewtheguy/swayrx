@@ -7,17 +7,22 @@
 //! ## One at a time
 //!
 //! The desktop is one client's. Finishing the handshake takes it, and the
-//! session that held it ends — it watches the compositor's `active` client
-//! rather than an [`Event`], so a session too far behind
+//! session that held it ends — it watches who the compositor says is where
+//! ([`Seats`]) rather than an [`Event`], so a session too far behind
 //! to read the broadcast cannot go on holding a desktop it no longer has. The
 //! watch races the message loop as a whole rather than being looked at between
 //! passes of it, so a client that has stopped reading its socket is cut off in
 //! the middle of the write it is blocking on. Client ids only ever go up, and
 //! that is what makes the test a comparison rather than an acknowledgement: an
-//! `active` above this session's own is a connection that joined after it,
+//! holder above this session's own is a connection that joined after it,
 //! whether or not this one ever saw itself there. Nothing a superseded session
 //! sent in the meantime is acted on: the compositor hears input, resize,
-//! density, output selection and clipboard from the active client alone.
+//! density, output selection and clipboard from the client on a desk alone.
+//!
+//! The one connection that takes nothing is the client's own second, which
+//! asks in its ClientInit to be shown another output beside it and is a session
+//! like any other on the second desk, for as long as the compositor keeps it
+//! there.
 //!
 //! ## Sending pixels
 //!
@@ -153,7 +158,7 @@ use crate::camera::{Camera, Signal as CameraSignal};
 use crate::framebuffer::{Rect, ResizeOrigin};
 use crate::microphone::{Microphone, Signal as MicrophoneSignal};
 use screen_vp9::walk::{Pace, QualityWalk};
-use crate::shared::{ClientId, Command, Event, Shared};
+use crate::shared::{BESIDE, ClientId, Command, Event, FIRST, Seats, Shared};
 
 /// What the server offers at the security step, and what it checks the client
 /// against: RSA-AES with a login, or nothing at all, in which case anyone who
@@ -244,24 +249,38 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
     socket.set_nodelay(true)?;
     let peer = socket.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
     let (reader, writer) = socket.into_split();
-    let (reader, mut writer) = tokio::time::timeout(config.handshake_timeout, handshake(reader, writer, &config, &peer))
+    let (reader, mut writer, beside) = tokio::time::timeout(config.handshake_timeout, handshake(reader, writer, &config, &peer))
         .await
         .map_err(|_| anyhow::anyhow!("the handshake took over {:?}", config.handshake_timeout))??;
+    let mut seats = shared.seats.subscribe();
+    // Before the join: what the compositor says of the desk as this client
+    // takes it is news the session must not miss.
+    let events = shared.events.subscribe();
+    let desk = if beside {
+        shared.command(Command::BesideJoined(id));
+        // Its ServerInit names the output it was given, so it waits to be.
+        let joined = seats.wait_for(|seats| seats.beside == id.0 || seats.beside_ended >= id.0).await.context("the compositor thread is gone")?;
+        anyhow::ensure!(joined.beside == id.0, "there is nothing to show beside");
+        BESIDE
+    } else {
+        FIRST
+    };
     let (width, height) = {
-        let fb = shared.framebuffer.lock().unwrap();
+        let fb = shared.desks[desk].framebuffer.lock().unwrap();
         (fb.width, fb.height)
     };
     writer.send(&msg::server_init(width, height, &PixelFormat::NATIVE, &config.name)).await?;
-    info!("client {}: authenticated; desktop {width}x{height}", id.0);
-    let mut active = shared.active.subscribe();
-    shared.command(Command::ClientJoined(id));
+    info!("client {}: authenticated; desktop {width}x{height}{}", id.0, if beside { ", beside" } else { "" });
+    if !beside {
+        shared.command(Command::ClientJoined(id));
+    }
 
-    let events = shared.events.subscribe();
-    let frames = shared.frame_tx.subscribe();
+    let frames = shared.desks[desk].frame_tx.subscribe();
     let stream = UNLISTED;
     let walk = QualityWalk::new(stream.quality, config.capture, stream.adaptive);
     let mut session = Session {
         id,
+        desk,
         shared,
         config,
         format: PixelFormat::NATIVE,
@@ -310,7 +329,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
     };
     let result = tokio::select! {
         result = session.pump(reader, writer) => result,
-        taken = superseded(&mut active, id) => Err(anyhow::anyhow!("client {} took the desktop", taken?)),
+        ended = superseded(&mut seats, id, beside) => Err(ended?),
     };
     // However the session ended — the client left, an error, or a takeover
     // cancelling the loop mid-write — the capture it may still hold is closed
@@ -337,24 +356,29 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
     result
 }
 
-/// Resolves once a later connection has taken the desktop. Ids only go up, so
-/// an `active` above this session's is a client that joined after it; anything
-/// below it — 0 included — is the compositor not having read this session's own
-/// join yet, which is what the wait is for.
-async fn superseded(active: &mut watch::Receiver<u64>, id: ClientId) -> anyhow::Result<u64> {
+/// Resolves, with why, once this session's desk is no longer its own. Ids only
+/// go up, so a holder above this session's is a client that joined after it;
+/// anything below it — 0 included — is the compositor not having read this
+/// session's own join yet, which is what the wait is for. A display beside ends
+/// when the compositor says every such connection up to its id has.
+async fn superseded(seats: &mut watch::Receiver<Seats>, id: ClientId, beside: bool) -> anyhow::Result<anyhow::Error> {
     loop {
-        let current = *active.borrow_and_update();
-        if current > id.0 {
-            return Ok(current);
+        let current = *seats.borrow_and_update();
+        if beside && current.beside_ended >= id.0 {
+            return Ok(anyhow::anyhow!("its display beside ended"));
         }
-        active.changed().await.context("the compositor thread is gone")?;
+        if !beside && current.holder > id.0 {
+            return Ok(anyhow::anyhow!("client {} took the desktop", current.holder));
+        }
+        seats.changed().await.context("the compositor thread is gone")?;
     }
 }
 
 /// RFB 3.8 version, security and ClientInit. Returns the transport the rest of
-/// the session runs over. The ClientInit shared flag is read and dropped: the
-/// desktop is one client's either way.
-async fn handshake(mut reader: OwnedReadHalf, mut writer: OwnedWriteHalf, config: &SessionConfig, peer: &str) -> anyhow::Result<(Reader, Writer)> {
+/// the session runs over, and whether the ClientInit asked to be shown another
+/// output beside the client on the desktop ([`msg::CLIENT_INIT_BESIDE`]). Any
+/// other value takes the desktop, RFB's shared flag included.
+async fn handshake(mut reader: OwnedReadHalf, mut writer: OwnedWriteHalf, config: &SessionConfig, peer: &str) -> anyhow::Result<(Reader, Writer, bool)> {
     writer.write_all(msg::PROTOCOL_VERSION).await?;
     let mut version = [0u8; 12];
     reader.read_exact(&mut version).await.context("reading the client's version")?;
@@ -391,12 +415,14 @@ async fn handshake(mut reader: OwnedReadHalf, mut writer: OwnedWriteHalf, config
         }
     };
     writer.send(&msg::security_ok()).await?;
-    let _shared = reader.read_u8().await.context("reading ClientInit")?;
-    Ok((reader, writer))
+    let init = reader.read_u8().await.context("reading ClientInit")?;
+    Ok((reader, writer, init == msg::CLIENT_INIT_BESIDE))
 }
 
 struct Session {
     id: ClientId,
+    /// The desk this client is on: [`FIRST`], or [`BESIDE`].
+    desk: usize,
     shared: Arc<Shared>,
     config: Arc<SessionConfig>,
     format: PixelFormat,
@@ -911,7 +937,7 @@ impl Session {
                     return Ok(());
                 }
                 let current = {
-                    let fb = self.shared.framebuffer.lock().unwrap();
+                    let fb = self.shared.desks[self.desk].framebuffer.lock().unwrap();
                     (fb.width, fb.height)
                 };
                 if !self.config.resize {
@@ -1036,15 +1062,15 @@ impl Session {
 
     async fn handle_event(&mut self, event: Event, writer: &mut Writer) -> anyhow::Result<()> {
         match event {
-            Event::Geometry { to } => {
-                if to.is_none_or(|c| c == self.id) && self.density {
+            Event::Geometry { desk, to } => {
+                if desk == self.desk && to.is_none_or(|c| c == self.id) && self.density {
                     self.send_geometry(writer).await?;
                 }
             }
             Event::ResizeRefused { client, status } => {
                 if client == self.id && self.eds_supported {
                     let current = {
-                        let fb = self.shared.framebuffer.lock().unwrap();
+                        let fb = self.shared.desks[self.desk].framebuffer.lock().unwrap();
                         (fb.width, fb.height)
                     };
                     self.send_eds(writer, msg::EDS_REASON_THIS_CLIENT, status, current).await?;
@@ -1056,9 +1082,9 @@ impl Session {
                 }
             }
             Event::Clipboard => self.announce_clipboard(writer).await?,
-            Event::Cursor => {
+            Event::Cursor { desk } => {
                 // Not before SetEncodings: that is when it is owed anyway.
-                if self.cursor_supported {
+                if desk == self.desk && self.cursor_supported {
                     self.announce_cursor = true;
                 }
             }
@@ -1135,7 +1161,7 @@ impl Session {
     }
 
     async fn send_geometry(&mut self, writer: &mut Writer) -> anyhow::Result<()> {
-        let g = self.shared.geometry();
+        let g = self.shared.desks[self.desk].geometry();
         debug!("client {}: reporting {}x{} at scale {:.2}", self.id.0, g.width, g.height, g.scale);
         writer.send(&output_scale(g.width, g.height, g.scale)).await?;
         Ok(())
@@ -1143,8 +1169,9 @@ impl Session {
 
     async fn send_outputs(&mut self, writer: &mut Writer) -> anyhow::Result<()> {
         let displays = self.shared.displays();
-        debug!("client {}: listing {} outputs, sharing id {}", self.id.0, displays.entries.len(), displays.active);
-        writer.send(&output_list(displays.active, &displays.entries)).await?;
+        let active = displays.active[self.desk];
+        debug!("client {}: listing {} outputs, sharing id {active}", self.id.0, displays.entries.len());
+        writer.send(&output_list(active, &displays.entries)).await?;
         Ok(())
     }
 
@@ -1169,7 +1196,7 @@ impl Session {
         let announced = self.announce_cursor || self.announce_eds || self.announce_audio;
         if self.announce_cursor {
             self.announce_cursor = false;
-            let image = self.shared.cursor();
+            let image = self.shared.desks[self.desk].cursor();
             let mut update = msg::update_header(1).to_vec();
             if self.alpha_cursor {
                 update.extend_from_slice(&alpha_cursor_rect(image.as_deref()));
@@ -1200,7 +1227,7 @@ impl Session {
         // everything else against. A cursor or a resize a quarter of a second
         // late is the one lag the walk is not there to add.
         let resized = {
-            let fb = self.shared.framebuffer.lock().unwrap();
+            let fb = self.shared.desks[self.desk].framebuffer.lock().unwrap();
             fb.painted && (fb.width, fb.height) != self.known_size
         };
         if !resized && self.frame_at().is_some() {
@@ -1215,7 +1242,7 @@ impl Session {
         let size;
         let full;
         {
-            let fb = self.shared.framebuffer.lock().unwrap();
+            let fb = self.shared.desks[self.desk].framebuffer.lock().unwrap();
             if !fb.painted {
                 drop(fb);
                 answered(self);
