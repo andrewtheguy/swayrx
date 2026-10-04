@@ -288,6 +288,8 @@ async fn serve(
         camera: config.camera,
         microphone: config.microphone,
         handshake_timeout: std::time::Duration::from_secs(config.handshake_timeout_secs),
+        output: config.output.clone(),
+        output_wait: std::time::Duration::from_secs(config.output_wait_secs),
     });
     loop {
         tokio::select! {

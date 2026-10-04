@@ -36,7 +36,8 @@ pub const BESIDE: usize = 1;
 pub enum Command {
     /// A client finished the handshake and takes the desktop: capture runs
     /// while it is on it, and a client already there is superseded, RFB's
-    /// ClientInit shared flag notwithstanding.
+    /// ClientInit shared flag notwithstanding. Sent before the client's
+    /// ServerInit, which may wait on what the desktop being held brings about.
     ClientJoined(ClientId),
     /// A client finished the handshake asking to show another output beside the
     /// client on the desktop, which stays. It is told the outcome through
@@ -105,6 +106,13 @@ pub struct Displays {
     /// Each desk's shared output's id, or 0 while it has none.
     pub active: [u32; 2],
     pub entries: Vec<OutputEntry>,
+}
+
+impl Displays {
+    /// Whether a desk's shared output is the one of this name.
+    pub fn shares(&self, desk: usize, name: &str) -> bool {
+        self.entries.iter().any(|entry| entry.id == self.active[desk] && entry.name == name)
+    }
 }
 
 /// Who is where. A `watch` and not an [`Event`]: a session too far behind to

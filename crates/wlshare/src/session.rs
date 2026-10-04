@@ -209,6 +209,10 @@ pub struct SessionConfig {
     pub microphone: bool,
     /// How long a connection has to finish the handshake before it is dropped.
     pub handshake_timeout: Duration,
+    /// The output the configuration names, and how long a client taking the
+    /// desktop waits for it before its ServerInit.
+    pub output: Option<String>,
+    pub output_wait: Duration,
 }
 
 /// The most rectangles one update carries before they collapse into one.
@@ -237,6 +241,12 @@ pub struct Writer {
 }
 
 impl Writer {
+    /// The socket under both halves, for what neither half is asked: whether
+    /// the peer is still there while nothing is being read or written.
+    fn socket(&self) -> &TcpStream {
+        self.inner.as_ref()
+    }
+
     async fn send(&mut self, message: &[u8]) -> std::io::Result<()> {
         match &mut self.sealer {
             Some(sealer) => self.inner.write_all(&sealer.frame(message)).await,
@@ -256,6 +266,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
     // Before the join: what the compositor says of the desk as this client
     // takes it is news the session must not miss.
     let events = shared.events.subscribe();
+    let mut arrivals = shared.events.subscribe();
     let desk = if beside {
         shared.command(Command::BesideJoined(id));
         // Its ServerInit names the output it was given, so it waits to be.
@@ -263,17 +274,39 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
         anyhow::ensure!(joined.beside == id.0, "there is nothing to show beside");
         BESIDE
     } else {
+        // Before its ServerInit: the desktop is held from here, and whatever
+        // follows the state socket may answer that by enabling the configured
+        // output, whose size is the one this client should be told first.
+        shared.command(Command::ClientJoined(id));
+        if let Some(wanted) = &config.output
+            && !config.output_wait.is_zero()
+            && !shared.displays().shares(FIRST, wanted)
+        {
+            info!("client {}: waiting up to {:?} for output {wanted}", id.0, config.output_wait);
+            // The desktop is held for as long as this waits, so it waits for
+            // nobody who is no longer owed it: a client that left, or one a
+            // later connection took the desktop from.
+            let arrived = tokio::select! {
+                arrived = output_shared(&shared, wanted, config.output_wait, &mut arrivals) => arrived,
+                taken = seats.wait_for(|seats| seats.holder > id.0) => {
+                    let holder = taken.context("the compositor thread is gone")?.holder;
+                    anyhow::bail!("client {holder} took the desktop");
+                }
+                () = peer_closed(writer.socket()) => anyhow::bail!("left while waiting for output {wanted}"),
+            };
+            if !arrived {
+                warn!("client {}: output {wanted} has not appeared; the desktop is the output shared meanwhile", id.0);
+            }
+        }
         FIRST
     };
+    drop(arrivals);
     let (width, height) = {
         let fb = shared.desks[desk].framebuffer.lock().unwrap();
         (fb.width, fb.height)
     };
     writer.send(&msg::server_init(width, height, &PixelFormat::NATIVE, &config.name)).await?;
     info!("client {}: authenticated; desktop {width}x{height}{}", id.0, if beside { ", beside" } else { "" });
-    if !beside {
-        shared.command(Command::ClientJoined(id));
-    }
 
     let frames = shared.desks[desk].frame_tx.subscribe();
     let stream = UNLISTED;
@@ -361,6 +394,34 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
 /// anything below it — 0 included — is the compositor not having read this
 /// session's own join yet, which is what the wait is for. A display beside ends
 /// when the compositor says every such connection up to its id has.
+/// Wait until the desktop is on the output of this name, for at most `wait`.
+/// `false` when it still is not. `arrivals` was subscribed before the join that
+/// may bring the output about, so its arriving is not missed; the list is read
+/// again on every event rather than trusted to one, since a receiver that
+/// lagged has dropped some.
+async fn output_shared(shared: &Shared, wanted: &str, wait: Duration, arrivals: &mut broadcast::Receiver<Event>) -> bool {
+    let waiting = async {
+        while !shared.displays().shares(FIRST, wanted) {
+            if let Err(broadcast::error::RecvError::Closed) = arrivals.recv().await {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(wait, waiting).await;
+    shared.displays().shares(FIRST, wanted)
+}
+
+/// Resolves when the peer has closed the connection or it has failed, and
+/// never for one that is still there. Nothing is read: bytes a client sent
+/// ahead of its ServerInit are the session's, and with those in the way the
+/// socket says no more until they are read, so this then waits for good.
+async fn peer_closed(socket: &TcpStream) {
+    if !matches!(socket.peek(&mut [0u8; 1]).await, Ok(1..)) {
+        return;
+    }
+    std::future::pending().await
+}
+
 async fn superseded(seats: &mut watch::Receiver<Seats>, id: ClientId, beside: bool) -> anyhow::Result<anyhow::Error> {
     loop {
         let current = *seats.borrow_and_update();
@@ -1542,5 +1603,101 @@ mod security_tests {
                 vec![rsa_aes::SECURITY_RSA_AES_256, rsa_aes::SECURITY_RSA_AES_128]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use crate::framebuffer::Framebuffer;
+    use crate::shared::{Displays, Geometry};
+    use wlshare_rfb::outputs::OutputEntry;
+
+    fn entry(id: u32, name: &str) -> OutputEntry {
+        OutputEntry { id, name: name.into(), width: 1920, height: 1080, scale: 1.0, headless: name.starts_with("HEADLESS-") }
+    }
+
+    /// A desktop on the monitor, the configured output not enabled.
+    fn shared() -> Arc<Shared> {
+        let (commands, _rx) = calloop::channel::channel();
+        let displays = Displays { active: [7, 0], entries: vec![entry(7, "Virtual-1")] };
+        Arc::new(Shared::new(Framebuffer::new(1, 1), Geometry { width: 1, height: 1, scale: 1.0 }, displays, commands))
+    }
+
+    /// What the compositor thread does when the configured output appears.
+    fn arrive(shared: &Shared) {
+        *shared.displays.lock().unwrap() = Displays { active: [9, 0], entries: vec![entry(9, "HEADLESS-1"), entry(7, "Virtual-1")] };
+        shared.emit(Event::Outputs);
+    }
+
+    /// The desk's shared output is the test, not the list: an output the
+    /// compositor has and the desktop is not on is not the client's yet.
+    #[test]
+    fn an_output_listed_is_not_an_output_shared() {
+        let displays = Displays { active: [7, 9], entries: vec![entry(9, "HEADLESS-1"), entry(7, "Virtual-1")] };
+        assert!(displays.shares(FIRST, "Virtual-1"));
+        assert!(!displays.shares(FIRST, "HEADLESS-1"));
+        assert!(displays.shares(BESIDE, "HEADLESS-1"));
+        assert!(!Displays::default().shares(FIRST, "HEADLESS-1"));
+    }
+
+    #[tokio::test]
+    async fn the_wait_ends_when_the_output_arrives() {
+        let shared = shared();
+        let mut arrivals = shared.events.subscribe();
+        let waiting = {
+            let shared = shared.clone();
+            tokio::spawn(async move { output_shared(&shared, "HEADLESS-1", Duration::from_secs(30), &mut arrivals).await })
+        };
+        // Other news first, which is not the output arriving.
+        shared.emit(Event::Clipboard);
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        arrive(&shared);
+        assert!(tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap());
+    }
+
+    /// An output that arrived between the subscription and the wait is found
+    /// in the list, with no event left to say so.
+    #[tokio::test]
+    async fn an_output_already_there_keeps_nobody_waiting() {
+        let shared = shared();
+        arrive(&shared);
+        let mut arrivals = shared.events.subscribe();
+        assert!(output_shared(&shared, "HEADLESS-1", Duration::from_secs(30), &mut arrivals).await);
+    }
+
+    /// Both ends of a loopback connection: the client's, and the server's.
+    async fn connection() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_left_is_noticed_and_one_that_is_there_is_not() {
+        let (client, server) = connection().await;
+        assert!(tokio::time::timeout(Duration::from_millis(100), peer_closed(&server)).await.is_err());
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), peer_closed(&server)).await.unwrap();
+    }
+
+    /// Bytes sent ahead are not a peer leaving, and are still there to read.
+    #[tokio::test]
+    async fn bytes_sent_ahead_are_left_for_the_session() {
+        let (mut client, mut server) = connection().await;
+        client.write_all(b"x").await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(100), peer_closed(&server)).await.is_err());
+        let mut byte = [0u8; 1];
+        server.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"x");
+    }
+
+    #[tokio::test]
+    async fn the_wait_gives_up_on_an_output_that_never_comes() {
+        let shared = shared();
+        let mut arrivals = shared.events.subscribe();
+        assert!(!output_shared(&shared, "HEADLESS-1", Duration::from_millis(50), &mut arrivals).await);
     }
 }

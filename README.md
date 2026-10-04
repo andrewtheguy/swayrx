@@ -164,6 +164,9 @@ from a process of its own, so a sway session can move its windows onto the
 headless output the client is shown and turn its monitors off while they are
 watched from elsewhere, then put them back — also when the daemon was killed
 with a client on the desktop, which the watcher reads as the desktop left. The
+headless output can itself be off while nobody is watching: `output` names a
+preference, not a requirement, and `output_wait_secs` keeps a client taking the
+desktop waiting for it while the watcher enables it. The
 example configuration shows the two `swaymsg` lines, and
 [`docs/architecture.md`](docs/architecture.md#the-state-socket) says when each
 runs.

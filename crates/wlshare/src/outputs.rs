@@ -13,7 +13,9 @@
 //!
 //! Which output is shared is the configuration's to begin with and the client's
 //! from there: a client that speaks the outputs extension is sent the list and
-//! may name another one ([`wlshare_rfb::outputs`], [`Outputs::entries`]).
+//! may name another one ([`wlshare_rfb::outputs`], [`Outputs::entries`]). The
+//! configured output need not be there: another is shared while it is not, and
+//! the desktop moves to it when it appears ([`Outputs::wanted`]).
 
 use std::collections::HashMap;
 
@@ -104,6 +106,10 @@ pub struct Outputs {
     pub serial: u32,
     /// The name of each desk's shared output, once chosen.
     pub selected: [Option<String>; 2],
+    /// The output the configuration names. The desktop is on it whenever the
+    /// compositor has it and the client has not named another: it is taken at
+    /// the start when it is there, and each time it appears.
+    pub wanted: Option<String>,
     /// The declaration whose configuration is out and not settled yet, and the
     /// desk it is for. One at a time, whichever desk asked: its settling is
     /// told apart from nothing else, and a configuration names every head.
@@ -221,18 +227,31 @@ impl Outputs {
         self.outputs.iter().find(|o| o.global == id).filter(|o| self.listable(o))
     }
 
-    /// Pick the shared output: the configured name, or the first one.
+    /// Whether this is the output the configuration names.
+    pub fn is_wanted(&self, name: Option<&str>) -> bool {
+        name.is_some() && self.wanted.as_deref() == name
+    }
+
+    /// Pick the shared output: the configured name, or the first one — also
+    /// when the compositor has none of that name, which is an output not
+    /// enabled yet rather than a mistake to stop on.
     pub fn select(&mut self, wanted: Option<&str>) -> anyhow::Result<()> {
-        let chosen = match wanted {
-            Some(name) => self
+        self.wanted = wanted.map(str::to_owned);
+        let named = wanted.and_then(|name| self.outputs.iter().find(|o| o.name.as_deref() == Some(name)));
+        if let (Some(name), None) = (wanted, named) {
+            let have: Vec<_> = self.outputs.iter().filter_map(|o| o.name.clone()).collect();
+            info!("no output named {name} yet; the compositor has {have:?}, and the first is shared until it appears");
+        }
+        let chosen = match named {
+            Some(output) => output,
+            // The first with a name: one without cannot be shared, and being
+            // listed first should not keep the daemon off one that can.
+            None => self
                 .outputs
                 .iter()
-                .find(|o| o.name.as_deref() == Some(name))
-                .ok_or_else(|| {
-                    let have: Vec<_> = self.outputs.iter().filter_map(|o| o.name.clone()).collect();
-                    anyhow::anyhow!("no output named {name}; the compositor has {have:?}")
-                })?,
-            None => self.outputs.first().ok_or_else(|| anyhow::anyhow!("the compositor has no outputs"))?,
+                .find(|o| o.name.is_some())
+                .or(self.outputs.first())
+                .ok_or_else(|| anyhow::anyhow!("the compositor has no outputs"))?,
         };
         let name = chosen.name.clone().ok_or_else(|| anyhow::anyhow!("the output has no name; wl_output version 4 is required"))?;
         info!(
@@ -315,7 +334,7 @@ impl Dispatch<WlOutput, ()> for Compositor {
             wl_output::Event::Scale { factor } => info.wl_scale = factor,
             wl_output::Event::Name { name } => info.name = Some(name),
             wl_output::Event::Done => {
-                info.done = true;
+                let appeared = !std::mem::replace(&mut info.done, true);
                 let name = info.name.clone();
                 for desk in state.outputs.desks_on(name.as_deref()) {
                     state.geometry_changed(desk);
@@ -324,6 +343,12 @@ impl Dispatch<WlOutput, ()> for Compositor {
                 if state.outputs.selected[FIRST].is_none() {
                     // Nothing is shared, and this output has just become
                     // something that can be: the desktop starts again on it.
+                    state.adopt_output();
+                } else if appeared && state.outputs.is_wanted(name.as_deref()) && state.outputs.selected[FIRST] != name {
+                    // The configured output is here, and the desktop was on
+                    // another only for want of it. On its appearing and not on
+                    // every `done`: a client that names another afterwards
+                    // stays where it asked to be.
                     state.adopt_output();
                 }
             }

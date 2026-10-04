@@ -27,8 +27,17 @@ pub struct Config {
     /// anyone who reaches the port is in.
     pub password: Option<Password>,
     /// The output to capture, by its `wl_output` name; absent means the first
-    /// one the compositor lists.
+    /// one the compositor lists. While the compositor has no output of this
+    /// name another one is shared, and the desktop moves to this one when it
+    /// appears.
     pub output: Option<String>,
+    /// How many seconds a client taking the desktop is kept from its
+    /// ServerInit while the compositor has no `output`, so whatever follows
+    /// the state socket has the time to enable it and the client starts on it
+    /// rather than on the output shared meanwhile. Zero, the default, keeps
+    /// nobody waiting.
+    #[serde(default)]
+    pub output_wait_secs: u64,
     /// Whether clients may resize the output and set its scale. Only a headless
     /// output is ever reconfigured.
     #[serde(default = "default_true")]
@@ -155,6 +164,7 @@ impl Config {
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.max_fps > 0, "max_fps must be at least 1");
         anyhow::ensure!(self.handshake_timeout_secs > 0, "handshake_timeout_secs must be at least 1");
+        anyhow::ensure!(self.output_wait_secs == 0 || self.output.is_some(), "output_wait_secs waits for `output`, which is not set");
         anyhow::ensure!(
             !(self.pam.is_some() && self.password.is_some()),
             "[pam] and [password] are two answers to the same question; keep one"
@@ -201,6 +211,17 @@ mod tests {
         assert_eq!(c.name, "wlshare");
         assert!(c.xkb.layout.is_empty());
         assert!(c.state_socket.is_none());
+        assert!(c.output.is_none());
+        assert_eq!(c.output_wait_secs, 0);
+    }
+
+    #[test]
+    fn the_output_wait_needs_an_output_to_wait_for() {
+        let c: Config = toml::from_str("output = \"HEADLESS-1\"\noutput_wait_secs = 10").unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.output_wait_secs, 10);
+        let nothing_named: Config = toml::from_str("output_wait_secs = 10").unwrap();
+        assert!(nothing_named.validate().is_err());
     }
 
     /// The hooks are gone: the daemon says where the desktop stands on its
