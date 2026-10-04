@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Two runs must not reserve the same tag.
     concurrency:
       group: sway-release-tag
@@ -48,9 +48,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             arch: amd64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -69,7 +69,7 @@ jobs:
 
   publish:
     needs: [prepare, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
