@@ -19,7 +19,8 @@
 //!
 //! The keyboard is the seat's, one for both desks, and what each desk's client
 //! holds on it is kept apart: a client leaving or being superseded lets go of
-//! its own keys and buttons, and of nothing the other holds.
+//! its own keys and buttons, and of nothing the other holds. A key both hold
+//! is down until the last of them lets go of it.
 //!
 //! Pointer positions arrive in framebuffer pixels and go to the compositor as
 //! absolute positions against the framebuffer's extent, which the virtual
@@ -117,8 +118,10 @@ struct Keys {
     keycodes: HashMap<u32, (u32, u32)>,
     /// The keycodes of the Shift keys, for pressing one and recognising any.
     shift_codes: Vec<u32>,
-    /// The keycodes the client holds.
+    /// The keycodes the clients hold between them.
     held: HashSet<u32>,
+    /// The keycodes each desk's client holds.
+    owners: [HashSet<u32>; 2],
     /// Keys pressed with Shift corrected around them.
     fixes: HashMap<u32, ShiftFix>,
     /// The transitions of the call under way.
@@ -130,8 +133,6 @@ pub struct Input {
     /// Each desk's pointer, while it has an output to point at.
     pointers: [Option<Pointer>; 2],
     keys: Keys,
-    /// The keysyms each desk's client holds.
-    held: [HashSet<u32>; 2],
     started: Instant,
 }
 
@@ -165,7 +166,7 @@ impl Keys {
         if shift_codes.is_empty() {
             warn!("the keymap has no Shift key: case cannot be corrected");
         }
-        Self { modifiers: Modifiers::new(keymap), keycodes, shift_codes, held: HashSet::new(), fixes: HashMap::new(), sent: Vec::new() }
+        Self { modifiers: Modifiers::new(keymap), keycodes, shift_codes, held: HashSet::new(), owners: Default::default(), fixes: HashMap::new(), sent: Vec::new() }
     }
 
     /// A KeyEvent, as the transitions to send for it.
@@ -181,12 +182,54 @@ impl Keys {
             // A repeat goes out too: the state is as the first press left it,
             // and stays so -- see [`Modifiers`].
             self.send_key(code, true);
-        } else if self.held.remove(&code) {
+        } else {
+            self.let_go(code);
+        }
+        std::mem::take(&mut self.sent)
+    }
+
+    fn let_go(&mut self, code: u32) {
+        if self.held.remove(&code) {
             self.release(code);
         } else {
             // A release of something not held: the compositor counts the
             // state anyway, so send it as it is.
             self.send_key(code, false);
+        }
+    }
+
+    /// A desk's KeyEvent. The keyboard is one for both desks, so a key goes up
+    /// only once neither client holds it: a release from one, of a key the
+    /// other holds, is the other's to send.
+    fn desk_key(&mut self, desk: usize, keysym: u32, down: bool) -> Vec<Sent> {
+        if let Some(&(code, _)) = self.keycodes.get(&keysym) {
+            if down {
+                self.owners[desk].insert(code);
+            } else {
+                self.owners[desk].remove(&code);
+                if self.owned(code) {
+                    return Vec::new();
+                }
+            }
+        }
+        self.key(keysym, down)
+    }
+
+    fn owned(&self, code: u32) -> bool {
+        self.owners.iter().any(|held| held.contains(&code))
+    }
+
+    /// Let go of every key a desk's client left held, but for those the other
+    /// desk's holds too.
+    fn desk_left(&mut self, desk: usize) -> Vec<Sent> {
+        for code in std::mem::take(&mut self.owners[desk]) {
+            if !self.owned(code) {
+                self.let_go(code);
+            }
+        }
+        // With nobody holding a key, what a correction left down goes too.
+        if self.owners.iter().all(HashSet::is_empty) {
+            return self.release_all();
         }
         std::mem::take(&mut self.sent)
     }
@@ -310,7 +353,6 @@ impl Input {
             keyboard,
             pointers: [None, None],
             keys: Keys::new(&keymap),
-            held: Default::default(),
             started: Instant::now(),
         })
     }
@@ -320,12 +362,7 @@ impl Input {
     }
 
     pub fn key(&mut self, desk: usize, keysym: u32, down: bool) {
-        if down {
-            self.held[desk].insert(keysym);
-        } else {
-            self.held[desk].remove(&keysym);
-        }
-        let sent = self.keys.key(keysym, down);
+        let sent = self.keys.desk_key(desk, keysym, down);
         self.send_keys(&sent);
     }
 
@@ -412,15 +449,8 @@ impl Input {
     /// Let go of everything a desk's client left held.
     pub fn release_all(&mut self, desk: usize) {
         let time = self.time();
-        for keysym in std::mem::take(&mut self.held[desk]) {
-            let sent = self.keys.key(keysym, false);
-            self.send_keys(&sent);
-        }
-        // With nobody holding a key, what a correction left down goes too.
-        if self.held.iter().all(HashSet::is_empty) {
-            let sent = self.keys.release_all();
-            self.send_keys(&sent);
-        }
+        let sent = self.keys.desk_left(desk);
+        self.send_keys(&sent);
         if let Some(Pointer { pointer, buttons }) = &mut self.pointers[desk] {
             let before = std::mem::take(buttons) & 7;
             if before != 0 {
@@ -441,6 +471,7 @@ mod tests {
     use xkbcommon::xkb;
 
     use super::{EVDEV_OFFSET, Keys, Modifiers, Sent, is_character};
+    use crate::shared::{BESIDE, FIRST};
 
     /// The evdev codes of Left Shift, Left Control, Left Alt and Left Meta.
     const MODIFIER_KEYS: [u32; 4] = [42, 29, 56, 125];
@@ -502,6 +533,36 @@ mod tests {
         keys.key(XK_SHIFT_L, true);
         assert_eq!(wire(keys.key(XK_SHIFT_L, false)), [(SHIFT, false, 0)]);
         assert_eq!(wire(keys.key(XK_UPPER_A, false)), [(A, false, 0)]);
+    }
+
+    #[test]
+    fn a_key_both_desks_hold_goes_up_with_the_last_of_them() {
+        let mut keys = Keys::new(&keymap());
+        assert_eq!(wire(keys.desk_key(FIRST, XK_TAB, true)), [(TAB, true, 0)]);
+        // The second press of a key already down is a repeat.
+        assert_eq!(wire(keys.desk_key(BESIDE, XK_TAB, true)), [(TAB, true, 0)]);
+        assert_eq!(wire(keys.desk_key(FIRST, XK_TAB, false)), []);
+        assert_eq!(wire(keys.desk_key(BESIDE, XK_TAB, false)), [(TAB, false, 0)]);
+    }
+
+    #[test]
+    fn a_release_from_a_desk_that_never_held_the_key_leaves_the_other_its_key() {
+        let mut keys = Keys::new(&keymap());
+        keys.desk_key(FIRST, XK_SHIFT_L, true);
+        assert_eq!(wire(keys.desk_key(BESIDE, XK_SHIFT_L, false)), []);
+        assert_eq!(wire(keys.desk_left(BESIDE)), []);
+        // The Shift is still down for the client that holds it.
+        assert_eq!(wire(keys.desk_key(FIRST, XK_TAB, true)), [(TAB, true, SHIFT_MASK)]);
+    }
+
+    #[test]
+    fn a_desk_leaving_lets_go_of_what_only_it_held() {
+        let mut keys = Keys::new(&keymap());
+        keys.desk_key(FIRST, XK_SHIFT_L, true);
+        keys.desk_key(BESIDE, XK_SHIFT_L, true);
+        keys.desk_key(BESIDE, XK_TAB, true);
+        assert_eq!(wire(keys.desk_left(BESIDE)), [(TAB, false, SHIFT_MASK)]);
+        assert_eq!(wire(keys.desk_left(FIRST)), [(SHIFT, false, 0)]);
     }
 
     fn depressed(modifiers: &Modifiers) -> u32 {

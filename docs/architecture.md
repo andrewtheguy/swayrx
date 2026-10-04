@@ -516,7 +516,8 @@ resize and density, under the rules of the output it is on. Its ServerInit
 names that output's size, so it is sent only once the output is its own. The
 keyboard is the seat's, and keys from either connection reach whatever the
 compositor has focused; what each holds is let go when it leaves, and nothing
-the other holds. The clipboard is the desktop's and is set by the client on
+the other holds. A key both hold goes up when the last of them lets go of it.
+The clipboard is the desktop's and is set by the client on
 it alone.
 
 What it may not do is choose. Which output is where is the client's on the
@@ -534,6 +535,8 @@ with that list as it is. It ends, its socket closed, when
 One that asks with nobody on the desktop, or with no output the client is not
 on, is closed before ServerInit. So is one whose handshake finished after a
 later connection's display beside had already ended: it takes nobody's place.
+And so is one that connected before the client now on the desktop did: it was
+opened beside whoever was there before.
 There is one beside, so two outputs at once is
 the most a client is shown. The remotex gateway opens it for the second
 display's browser tab on *All Displays*, and lists on it the pixel encodings,

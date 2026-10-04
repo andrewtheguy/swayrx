@@ -442,14 +442,20 @@ impl Compositor {
     ///
     /// Handshakes finish out of order, so the connection asking may be older
     /// than one already ended. Its session would end the moment it was seated,
-    /// so it is refused, and whoever is beside stays.
+    /// so it is refused, and whoever is beside stays. One older than the client
+    /// on the desktop was opened beside whoever was there before, and a display
+    /// beside is its client's: it is refused too.
     fn join_beside(&mut self, id: ClientId) {
         if self.shared().seats.borrow().beside_ended >= id.0 {
             info!("client {}: a later connection beside has already ended", id.0);
             return self.shared().end_beside(id);
         }
-        if self.desks[FIRST].client.is_none() {
+        let Some(holder) = self.desks[FIRST].client else {
             info!("client {}: nobody is on the desktop to be beside", id.0);
+            return self.shared().end_beside(id);
+        };
+        if holder.0 > id.0 {
+            info!("client {}: client {} took the desktop since it connected", id.0, holder.0);
             return self.shared().end_beside(id);
         }
         self.end_beside();
