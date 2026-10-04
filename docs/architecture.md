@@ -36,8 +36,10 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
   `microphone.rs` are PipeWire's side, and `decode.rs` is the camera's libavcodec decoder;
   `framebuffer.rs` is the shared pixels and damage;
   `session.rs` is one client; `auth.rs` checks an RSA-AES login and `pam.rs` is
-  the system half of that check; `hooks.rs` runs the configured commands when
-  the desktop is taken and released; `shared.rs` is what crosses between them.
+  the system half of that check; `state.rs` tells whoever connects to the state socket
+  whether the desktop is held, and `watch.rs` is `wlshare watch`, the process
+  that follows it and runs a command for each; `shared.rs` is what crosses
+  between them.
 
 Its client is the remotex gateway, which every viewer reaches the desktop
 through.
@@ -77,43 +79,74 @@ is the answer to the other end of the race — two connections whose joins are
 queued together, where the second is on the desktop before the first has
 subscribed at all.
 
-### The hooks
+### The state socket
 
-The `[hooks]` table names a command for the moment the desktop is taken and one
-for the moment it is released, so the session can be rearranged around the
-client: sway can be told to disable the monitors, which moves their workspaces
-onto the headless output the client is shown, and to enable them again when the
-client is gone. The daemon itself does nothing to the session, since what to do
-is the compositor's and the operator's: the hooks run through `sh -c`, with the
-daemon's environment, inside the session.
+`state_socket` names a Unix socket on which the daemon says whether a client is
+on the desktop, so the session can be rearranged around the client: sway can be
+told to disable the monitors, which moves their workspaces onto the headless
+output the client is shown, and to enable them again when the client is gone.
+The daemon itself does nothing to the session and runs nothing: what to do is
+the compositor's and the operator's, and so is noticing that the daemon has
+gone, which a daemon cannot be relied on to say.
 
-They follow the desktop, not the connections, and that is what makes them safe
-to point at the monitors. *Taken* runs when a client takes a desktop nobody
-held, and *released* when the client on it has left and nobody has taken it for
-`release_after_secs`. A takeover is the desktop passing from one client to
-another, held before and after, and runs neither; a client that drops and
-reconnects inside the grace runs neither either, so a flapping link does not
-flap the monitors. A display beside holds nothing and counts for nothing. The
-task reads the same `watch` of seats the sessions do, so what it sees is where
-the desktop stands now, however many joins and leaves happened in between.
+A connection is told where the desktop stands — `held` or `free`, one word to a
+line — and again each time that changes; it says nothing itself, and only the
+account the daemon runs as can connect. The words follow the desktop, not the
+connections: a takeover is the desktop passing from one client to another, held
+before and after, and is not a change, and a display beside holds nothing. Each
+connection reads the same `watch` of seats the sessions do, so what it is told
+is where the desktop stands now, however many joins and leaves happened in
+between.
 
-One hook runs at a time. When it exits, the hook for where the desktop stands
-*now* runs if that differs from what the last hook told it, so a slow *taken*
-followed by a leave is followed by *released*, and a slow *taken* followed by a
-leave and a return by nothing. The desktop is watched while a hook runs, so the
-grace counts from when the client left and not from when the hook ended. A hook still running at `timeout_secs` is killed
-rather than waited on, because the hook that puts the monitors back is the one
-an operator is counting on; each hook runs as a process group of its own and the
-group is what is killed, so what the shell started goes with it; the same
-happens to a hook whose task is dropped under it. A hook's exit status is logged
-and changes nothing else.
+The end of the stream is the third thing a follower is told, and the reason
+this is a socket and not a command the daemon runs. The kernel closes it when
+the daemon is gone, whether it stopped, panicked or was killed where it stood,
+so a daemon that never got to say the desktop was free has said so all the same.
+The file is removed by a daemon that stops in order and replaced by the next one
+otherwise. A socket that still answers is another daemon's: a second one
+refuses to start on it rather than take its followers, and a daemon removes
+the file only while it is still the one it made.
 
-A daemon that stops while the last hook said the desktop was taken — on SIGINT
-or SIGTERM, or because the compositor connection closed — runs *released* before
-it exits, without the grace and after any hook still running: a daemon started
-afterwards begins from a desktop nobody holds and would never run it. A desktop the hooks left dark is recovered with the same command the
-*released* hook runs, from a console or over SSH with `SWAYSOCK` set, or from a
-sway keybinding, since the keyboard still reaches the compositor.
+### The watcher
+
+`wlshare watch --held COMMAND --free COMMAND` is that follower: a process of its
+own, started by the session — a user unit beside the daemon's, or the
+compositor's `exec` — with the session's environment, which reads the same
+configuration file for where the socket is. It runs *held* when a client is on
+the desktop and *free* when nobody has been for `--free-after-secs`, through
+`sh -c`. A daemon it cannot reach holds nothing, and the socket is tried again
+every second, so the order the two start in does not matter and neither does
+which of them is restarted.
+
+It keeps the session at a state rather than reporting transitions. The first
+command it runs is the one for where the desktop stands when it starts, since
+it cannot know what an earlier watcher left behind, and it runs nothing until
+that is known — the daemon has said, or cannot be reached — so a watcher
+started under a client never frees the desktop first; after that a command runs
+only when the desktop stands otherwise than the last command said. Both
+commands therefore have to be safe to run on a session already as they would
+leave it. The wait before *free* is what keeps a flapping link from flapping
+the monitors, and a daemon restarted by its unit from doing the same: the
+client that comes back inside it, through the same daemon or the next, runs
+neither command.
+
+One command runs at a time. When it exits, the command for where the desktop
+stands *now* runs if that differs from what the last one said, so a slow *held*
+followed by a leave is followed by *free*, and a slow *held* followed by a
+leave and a return by nothing. The desktop is watched while a command runs, so
+the wait counts from when the client left and not from when the command ended.
+A command still running at `--timeout-secs` is killed rather than waited on,
+because the one that puts the monitors back is the one an operator is counting
+on; each runs as a process group of its own and the group is what is killed, so
+what the shell started goes with it; the same happens to a command whose task
+is dropped under it. A command's exit status is logged and changes nothing
+else.
+
+A watcher that stops while its last command said the desktop was held — on
+SIGINT or SIGTERM — runs *free* before it exits, without the wait and after any
+command still running. One that is killed where it stands leaves the session as
+it was, and the watcher its unit starts in its place runs the command for where
+the desktop stands, which is what puts it right.
 
 ## Capture
 

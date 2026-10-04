@@ -76,32 +76,42 @@ microphone = false
 # The desktop name clients see.
 name = "wlshare"
 
-# Commands run through `sh -c`, with the daemon's environment, when the desktop
-# is taken by a client while nobody held it, and when it has been released --
-# its client gone and nobody back in its place -- for release_after_secs. The
-# two follow the desktop, not the connections: a takeover runs neither, and a
-# client that leaves and reconnects inside the grace runs neither. One hook runs
-# at a time, for at most timeout_secs before it is killed, so a hook that hangs
-# cannot hold back the one that follows. A daemon stopped while the desktop is
-# taken runs `released` before it exits.
+# A Unix socket that tells whoever connects whether a client is on the desktop:
+# one line, `held` or `free`, and another each time that changes. Under
+# $XDG_RUNTIME_DIR when the path is relative; only the account the daemon runs
+# as can connect. A takeover is the desktop passing from one client to another
+# and is not a change. Absent means no socket.
 #
-# The case they are for: a sway session whose windows should move onto the
+# The socket closes when the daemon is gone, however it went, and that is what
+# it is for: `wlshare watch` follows it from a process of its own, reads a
+# daemon it cannot reach as a desktop nobody holds, and runs a command for each
+# of the two through `sh -c`:
+#
+#   wlshare watch --held "..." --free "..." [--free-after-secs 5] [--timeout-secs 60]
+#
+# --held runs when a client is on the desktop and --free when nobody has been
+# for --free-after-secs, so neither runs for a client that leaves and reconnects
+# inside the wait, nor for a daemon restarted inside it. The first to run is the
+# one for where the desktop stands when the watcher starts, so both have to be
+# safe to run twice. One runs at a time, for at most --timeout-secs before it is
+# killed. A watcher stopped while the desktop is held runs --free before it
+# exits.
+#
+# The case it is for: a sway session whose windows should move onto the
 # headless output a remote client is shown while the monitors go dark, and
 # back when it leaves. With `output = "HEADLESS-1"` above and a headless output
 # created at session start (`swaymsg create_output`, placed where no monitor is
-# adjacent), the two hooks are
+# adjacent), the watcher is started by the session, from a user unit beside
+# wlshare's or with sway's `exec`:
 #
-#   taken    = "swaymsg 'output DP-1 disable, output DP-2 disable'"
-#   released = "swaymsg 'output DP-1 enable, output DP-2 enable'"
+#   wlshare watch \
+#       --held "swaymsg 'output DP-1 disable, output DP-2 disable'" \
+#       --free "swaymsg 'output DP-1 enable, output DP-2 enable'"
 #
 # since sway moves a disabled output's workspaces to an enabled one. A desktop
 # left dark is recovered the same way from a console or over SSH, with SWAYSOCK
 # set: `swaymsg 'output * enable'`.
-# [hooks]
-# taken = ""
-# released = ""
-# release_after_secs = 5
-# timeout_secs = 60
+# state_socket = "wlshare/state.sock"
 
 # The keymap the virtual keyboard uploads and keysyms are resolved through, as
 # XKB rules/model/layout/variant/options names. Empty means the library default.
