@@ -10,8 +10,10 @@
 //! own for as long as it listens ([`audio`]), and a client that plugs a camera
 //! gets a PipeWire video source, decoded by libavcodec, for as long as it is
 //! plugged ([`camera`], [`decode`]); a client that plugs a microphone gets a
-//! PipeWire audio source the same way ([`microphone`]). A configured command
-//! runs when the desktop is taken and another when it is released ([`hooks`]).
+//! PipeWire audio source the same way ([`microphone`]). Whether the desktop is
+//! held is told on a socket to whoever connects ([`state`]), and `wlshare watch`
+//! is a process of its own that follows it and runs a command for a desktop
+//! that is held and one for a desktop that is free ([`watch`]).
 
 mod audio;
 mod auth;
@@ -23,13 +25,14 @@ mod config;
 mod cursor;
 mod decode;
 mod framebuffer;
-mod hooks;
 mod input;
 mod microphone;
 mod outputs;
 mod pam;
 mod session;
 mod shared;
+mod state;
+mod watch;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,21 +64,32 @@ enum Command {
     /// print it. The password is read from the terminal without echo, or from
     /// standard input when that is not a terminal.
     HashPassword,
+    /// Follow the daemon's state socket and keep the session at what it says:
+    /// one command for a desktop a client is on, one for a desktop nobody is
+    /// on, the daemon having gone included. The first to run is the one for
+    /// where the desktop stands when this starts, so both must be safe to run
+    /// twice.
+    Watch(watch::Watch),
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    if let Some(Command::HashPassword) = args.command {
-        return hash_password();
-    }
     let path = args.config.unwrap_or_else(config::default_path);
+    let watch = match args.command {
+        Some(Command::HashPassword) => return hash_password(),
+        Some(Command::Watch(watch)) => Some(watch),
+        None => None,
+    };
     let mut config = if path.exists() {
         config::Config::load(&path)?
     } else {
         info!("no configuration at {}; using defaults", path.display());
         toml::from_str("").context("default configuration")?
     };
+    if let Some(watch) = watch {
+        return follow(&config, &path, watch);
+    }
     if let Some(listen) = args.listen {
         config.listen = listen;
     }
@@ -91,6 +105,31 @@ fn main() -> anyhow::Result<()> {
         error!("{e:#}");
     }
     result
+}
+
+/// `wlshare watch`: follow the state socket the configuration names until
+/// interrupted or terminated.
+fn follow(config: &config::Config, config_path: &std::path::Path, watch: watch::Watch) -> anyhow::Result<()> {
+    watch.validate()?;
+    let socket = config.state_socket.as_deref().with_context(|| format!("{} names no state_socket to follow", config_path.display()))?;
+    let socket = state::path(socket)?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let mut terminated = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).context("handling SIGTERM")?;
+        let (held, desktop) = tokio::sync::watch::channel(false);
+        let following = tokio::spawn(state::follow(socket, held));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let watching = tokio::spawn(watch::run(desktop, watch, stopped));
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => info!("interrupted"),
+            _ = terminated.recv() => info!("terminated"),
+        }
+        // A session the watcher left held is freed before it goes.
+        let _ = stop.send(());
+        watching.await.context("the watcher")?;
+        following.abort();
+        Ok(())
+    })
 }
 
 /// What the configuration says about who may connect: the login one of the two
@@ -224,12 +263,20 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await.with_context(|| format!("listening on {}", config.listen))?;
     info!("listening on {}", config.listen);
-    let hooks = config.hooks.clone().map(|hooks| {
-        let (stop, stopped) = tokio::sync::oneshot::channel();
-        (stop, tokio::spawn(hooks::run(shared.clone(), hooks, stopped)))
-    });
+    // Removed with the daemon, when the daemon gets to: a follower reads the
+    // closed socket and not the file.
+    let _state = match &config.state_socket {
+        Some(socket) => {
+            let socket = state::path(socket)?;
+            let (followers, bound) = state::bind(&socket)?;
+            info!("telling whether the desktop is held on {}", socket.display());
+            tokio::spawn(state::serve(followers, shared.clone()));
+            Some(bound)
+        }
+        None => None,
+    };
     // What systemd stops a unit with; without a handler it ends the process
-    // where it stands, a taken desktop left as the hook made it.
+    // where it stands, the socket's file left behind.
     let mut terminated = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).context("handling SIGTERM")?;
     let session_config = Arc::new(session::SessionConfig {
         security,
@@ -241,7 +288,7 @@ async fn serve(
         microphone: config.microphone,
         handshake_timeout: std::time::Duration::from_secs(config.handshake_timeout_secs),
     });
-    let result = loop {
+    loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (socket, peer) = match accepted.context("accepting a client") {
@@ -275,13 +322,5 @@ async fn serve(
                 break Ok(());
             }
         }
-    };
-    // However the daemon stops, a desktop the hooks took is released first.
-    if let Some((stop, task)) = hooks {
-        let _ = stop.send(());
-        if let Err(e) = task.await {
-            error!("the hooks task: {e}");
-        }
     }
-    result
 }
