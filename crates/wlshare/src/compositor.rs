@@ -566,10 +566,12 @@ impl Compositor {
         self.start_capture(desk);
     }
 
-    /// Share whatever output is left, there being none shared: the one that was
-    /// went away, or the desktop has not had one yet. The list's own order
-    /// decides, so a client lands on the output its menu shows first rather than
-    /// on whichever the compositor happened to announce first.
+    /// Share the output the desktop belongs on: the configured one when the
+    /// compositor has it, otherwise whatever is left. Either there is none
+    /// shared — the one that was went away, or the desktop has not had one yet
+    /// — or the configured one has just appeared. Without it the list's own
+    /// order decides, so a client lands on the output its menu shows first
+    /// rather than on whichever the compositor happened to announce first.
     ///
     /// With nothing left to share the capture stops and the list goes out empty.
     /// The geometry and the framebuffer stand as they were: a desktop of no size
@@ -580,7 +582,9 @@ impl Compositor {
         if self.shared.is_none() {
             return;
         }
-        let Some(entry) = self.outputs.entries().into_iter().next() else {
+        let mut entries = self.outputs.entries();
+        let at = entries.iter().position(|entry| self.outputs.is_wanted(Some(&entry.name))).unwrap_or(0);
+        let Some(entry) = (at < entries.len()).then(|| entries.swap_remove(at)) else {
             warn!("no output is left to share; the capture stops until one appears");
             self.stop_capture(FIRST);
             return self.answer_outputs();

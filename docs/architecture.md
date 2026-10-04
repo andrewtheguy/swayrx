@@ -89,6 +89,21 @@ The daemon itself does nothing to the session and runs nothing: what to do is
 the compositor's and the operator's, and so is noticing that the daemon has
 gone, which a daemon cannot be relied on to say.
 
+The headless output need not be there while nobody is watching. The configured
+`output` is a preference: with no output of that name the daemon shares another
+and moves the desktop to the configured one each time it appears — on its
+appearing only, so a client that then names another output stays where it asked
+to be. A client takes the desktop before its ServerInit rather than after, so
+the socket says `held` while the client has still been told no size, and with
+`output_wait_secs` set the session waits that long for the configured output to
+be the shared one: whatever follows the socket enables it, and the size the
+client is told first is that output's, not a monitor's it would have been shown
+for a moment and whose mode it cannot change. The wait ends the moment the
+output is shared and otherwise runs out, and the client starts on the output
+shared meanwhile. Enabling it is not the daemon's: a compositor reports a
+disabled head with no position, so a daemon enabling one through
+wlr-output-management would be choosing where it goes.
+
 A connection is told where the desktop stands — `held` or `free`, one word to a
 line — and again each time that changes; it says nothing itself, and only the
 account the daemon runs as can connect. The words follow the desktop, not the

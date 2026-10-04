@@ -33,8 +33,19 @@ listen = "127.0.0.1:5900"
 
 # The output to share, by its Wayland `wl_output` name. Absent means the first
 # output the compositor lists. Only a HEADLESS-* output is ever resized or
-# rescaled for a client.
+# rescaled for a client. An output of this name the compositor does not have --
+# a disabled one -- is not an error: another is shared meanwhile, and the
+# desktop moves to this one when it appears.
 # output = "HEADLESS-1"
+
+# Seconds a client taking the desktop is kept waiting, before it is told the
+# desktop's size, while the compositor has no `output`. For a headless output
+# that is only enabled while a client is on the desktop: the watcher below
+# enables it in its --held command, which runs when the client takes the
+# desktop, and the client starts on it instead of on a monitor. It goes on the
+# moment the output is shared, and on the output shared meanwhile when the wait
+# runs out. Zero keeps nobody waiting.
+# output_wait_secs = 0
 
 # Whether clients may resize the output and set its scale.
 resize = true
@@ -111,6 +122,14 @@ name = "wlshare"
 # since sway moves a disabled output's workspaces to an enabled one. A desktop
 # left dark is recovered the same way from a console or over SSH, with SWAYSOCK
 # set: `swaymsg 'output * enable'`.
+#
+# For a headless output that exists only while a client is on the desktop, set
+# output_wait_secs above, enable it first in --held and disable it last in
+# --free, once the monitors are back:
+#
+#   wlshare watch \
+#       --held "swaymsg 'output HEADLESS-1 enable, output DP-1 disable'" \
+#       --free "swaymsg 'output DP-1 enable, output HEADLESS-1 disable'"
 # state_socket = "wlshare/state.sock"
 
 # The keymap the virtual keyboard uploads and keysyms are resolved through, as
