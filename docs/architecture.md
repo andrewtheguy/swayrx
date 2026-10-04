@@ -100,11 +100,18 @@ the desktop stands now, however many joins and leaves happened in between.
 One hook runs at a time. When it exits, the hook for where the desktop stands
 *now* runs if that differs from what the last hook told it, so a slow *taken*
 followed by a leave is followed by *released*, and a slow *taken* followed by a
-leave and a return by nothing. A hook still running at `timeout_secs` is killed
+leave and a return by nothing. The desktop is watched while a hook runs, so the
+grace counts from when the client left and not from when the hook ended. A hook still running at `timeout_secs` is killed
 rather than waited on, because the hook that puts the monitors back is the one
 an operator is counting on; each hook runs as a process group of its own and the
-group is what is killed, so what the shell started goes with it. A hook's exit
-status is logged and changes nothing else. A desktop the hooks left dark is recovered with the same command the
+group is what is killed, so what the shell started goes with it; the same
+happens to a hook whose task is dropped under it. A hook's exit status is logged
+and changes nothing else.
+
+A daemon that stops while the last hook said the desktop was taken — on SIGINT
+or SIGTERM, or because the compositor connection closed — runs *released* before
+it exits, without the grace and after any hook still running: a daemon started
+afterwards begins from a desktop nobody holds and would never run it. A desktop the hooks left dark is recovered with the same command the
 *released* hook runs, from a console or over SSH with `SWAYSOCK` set, or from a
 sway keybinding, since the keyboard still reaches the compositor.
 

@@ -82,7 +82,8 @@ name = "wlshare"
 # two follow the desktop, not the connections: a takeover runs neither, and a
 # client that leaves and reconnects inside the grace runs neither. One hook runs
 # at a time, for at most timeout_secs before it is killed, so a hook that hangs
-# cannot hold back the one that follows.
+# cannot hold back the one that follows. A daemon stopped while the desktop is
+# taken runs `released` before it exits.
 #
 # The case they are for: a sway session whose windows should move onto the
 # headless output a remote client is shown while the monitors go dark, and
