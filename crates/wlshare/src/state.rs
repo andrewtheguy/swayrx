@@ -56,7 +56,7 @@ impl Drop for Bound {
 /// Listen at `path`, in place of whatever a daemon before this one left there.
 /// Only the owner can connect.
 pub fn bind(path: &Path) -> anyhow::Result<(UnixListener, Bound)> {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+    use std::os::unix::fs::DirBuilderExt as _;
     if let Some(dir) = path.parent() {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -65,10 +65,17 @@ pub fn bind(path: &Path) -> anyhow::Result<(UnixListener, Bound)> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
     }
-    let listener = UnixListener::bind(path).with_context(|| format!("listening on {}", path.display()))?;
-    let bound = Bound(path.to_owned());
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).with_context(|| format!("restricting {}", path.display()))?;
-    Ok((listener, bound))
+    // The owner's alone from the moment it exists: a mode set afterwards would
+    // leave it open to others in between, in a directory this did not make.
+    // The mask is the whole process's, and all another thread could get from it
+    // meanwhile is a file more closed than it asked for.
+    // SAFETY: umask only swaps the process's file mode creation mask.
+    let mask = unsafe { libc::umask(0o177) };
+    let listener = UnixListener::bind(path);
+    // SAFETY: as above, putting back the mask it returned.
+    unsafe { libc::umask(mask) };
+    let listener = listener.with_context(|| format!("listening on {}", path.display()))?;
+    Ok((listener, Bound(path.to_owned())))
 }
 
 /// Accept followers for as long as the daemon runs.
@@ -228,8 +235,14 @@ mod tests {
         let (listener, bound) = bind(&path).unwrap();
         std::mem::forget(bound);
         drop(listener);
+        // SAFETY: umask only swaps the process's file mode creation mask.
+        let mask = unsafe { libc::umask(0o022) };
         let (_listener, _bound) = bind(&path).unwrap();
+        // SAFETY: as above.
+        let restored = unsafe { libc::umask(mask) };
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        // The mask the process had is the one it has again.
+        assert_eq!(restored, 0o022);
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
         let _ = std::fs::remove_dir_all(dir);
     }
