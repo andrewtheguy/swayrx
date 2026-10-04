@@ -532,7 +532,9 @@ with that list as it is. It ends, its socket closed, when
 - the compositor takes its output away.
 
 One that asks with nobody on the desktop, or with no output the client is not
-on, is closed before ServerInit. There is one beside, so two outputs at once is
+on, is closed before ServerInit. So is one whose handshake finished after a
+later connection's display beside had already ended: it takes nobody's place.
+There is one beside, so two outputs at once is
 the most a client is shown. The remotex gateway opens it for the second
 display's browser tab on *All Displays*, and lists on it the pixel encodings,
 the cursor, the size and the density and nothing else.

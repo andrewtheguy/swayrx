@@ -439,7 +439,15 @@ impl Compositor {
     /// desktop: the first the list shows that this client is not on. It takes
     /// the place of a connection already beside. With nobody on the desktop, or
     /// no other output, it is ended instead.
+    ///
+    /// Handshakes finish out of order, so the connection asking may be older
+    /// than one already ended. Its session would end the moment it was seated,
+    /// so it is refused, and whoever is beside stays.
     fn join_beside(&mut self, id: ClientId) {
+        if self.shared().seats.borrow().beside_ended >= id.0 {
+            info!("client {}: a later connection beside has already ended", id.0);
+            return self.shared().end_beside(id);
+        }
         if self.desks[FIRST].client.is_none() {
             info!("client {}: nobody is on the desktop to be beside", id.0);
             return self.shared().end_beside(id);
