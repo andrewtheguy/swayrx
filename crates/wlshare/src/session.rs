@@ -219,10 +219,10 @@ pub struct SessionConfig {
     pub output: Option<String>,
     pub output_wait: Duration,
     /// Where each session writes what its VP9 stream is handed, exact
-    /// ([`screen_vp9::capture`]), or `None` for no capture: a developer's
-    /// flag, for the encoder to be measured on the pictures a desktop is
-    /// shown as.
-    pub capture_vp9: Option<PathBuf>,
+    /// ([`wlshare_rfb::capture`]), or `None` for no capture: a flag of a
+    /// daemon run by hand, for an encoder to be run again on the pictures a
+    /// desktop is shown as.
+    pub capture_frames: Option<PathBuf>,
 }
 
 /// The most rectangles one update carries before they collapse into one.
@@ -506,7 +506,7 @@ struct Session {
     /// What the VP9 encoder is handed, written as it is handed it, while the
     /// daemon was started with a capture directory: opened at the session's
     /// first VP9 frame, and spanning every encoder the session makes.
-    capture: Option<screen_vp9::capture::Writer<BufWriter<File>>>,
+    capture: Option<wlshare_rfb::capture::Writer<BufWriter<File>>>,
     /// The client listed the VP9 encoding, which it gets instead of Raw or ZRLE.
     use_vp9: bool,
     /// What the VP9 stream is to be: its chroma, the ceiling of its quality
@@ -1493,15 +1493,15 @@ impl Session {
         }
         let changed: Option<Vec<vp9::Rect>> =
             changed.map(|rects| rects.iter().map(|r| vp9::Rect { x: r.x, y: r.y, width: r.width, height: r.height }).collect());
-        if let Some(dir) = &self.config.capture_vp9 {
+        if let Some(dir) = &self.config.capture_frames {
             let capture = match &mut self.capture {
                 Some(capture) => capture,
                 None => {
                     let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
-                    let path = dir.join(format!("{millis}-client{}.vp9cap", self.id.0));
+                    let path = dir.join(format!("{millis}-client{}.wlcap", self.id.0));
                     let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
                     info!("client {}: capturing what the VP9 encoder is handed into {}", self.id.0, path.display());
-                    let writer = screen_vp9::capture::Writer::new(BufWriter::with_capacity(1 << 20, file)).context("beginning the VP9 capture")?;
+                    let writer = wlshare_rfb::capture::Writer::new(BufWriter::with_capacity(1 << 20, file)).context("beginning the VP9 capture")?;
                     self.capture.insert(writer)
                 }
             };

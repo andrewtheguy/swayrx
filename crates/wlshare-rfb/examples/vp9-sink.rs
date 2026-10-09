@@ -1,12 +1,13 @@
 //! A client that takes the daemon's VP9 stream and throws it away: what the
 //! capture container (`docker/capture/`) connects to the daemon with, so that
 //! a session runs — the stream is coded, the walk hears its fences, and a
-//! daemon started with `--capture-vp9` writes what the encoder was handed —
+//! daemon started with `--capture-frames` writes what the encoder was handed —
 //! without the remotex gateway.
 //!
 //! ```text
 //! vp9-sink ADDR --size WxH [--quality 1..100] [--held] [--seconds N]
-//!          [--resize SECS:WxH] [--slow SECS:SECS:MILLIS] [--keyframe SECS]
+//!          [--frames N] [--resize SECS:WxH] [--slow SECS:SECS:MILLIS]
+//!          [--keyframe SECS] [--keys]
 //! ```
 //!
 //! The handshake is RFB 3.8 with security None, so the daemon is one started
@@ -22,12 +23,19 @@
 //! fences answered promptly after it bring it back up, and a desktop that
 //! then goes quiet is settled.
 //! `--keyframe` asks for the whole framebuffer, non-incrementally, at that
-//! second, which the daemon answers with a keyframe. Every second a line
+//! second, which the daemon answers with a keyframe. `--frames` keeps the
+//! session past `--seconds` until that many frames have come, for content
+//! the encoder takes long over, and for ten times `--seconds` at most: a
+//! desktop that has gone still never sends them. With `--keys` the sink types:
+//! every line of its standard input is a keysym in hexadecimal, pressed and
+//! let go as a KeyEvent each, so that what plays the desktop types through
+//! the daemon as a person at a client does, on the daemon's own keyboard.
+//! Every second a line
 //! says how many frames and bytes came and how many were keyframes.
 
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 use wlshare_rfb::client::{self, RectBody, ServerMsg};
 use wlshare_rfb::msg::{FENCE_REQUEST, SECURITY_NONE};
@@ -40,9 +48,11 @@ struct Args {
     quality: u8,
     held: bool,
     seconds: u64,
+    frames: u64,
     resize: Option<(f64, (u16, u16))>,
     slow: Option<(f64, (f64, u64))>,
     keyframe: Option<f64>,
+    keys: bool,
 }
 
 fn size(s: &str) -> Result<(u16, u16), String> {
@@ -58,7 +68,7 @@ fn at<T>(s: &str, parse: impl Fn(&str) -> Result<T, String>) -> Result<(f64, T),
 fn parse_args() -> Result<Args, String> {
     let mut args = std::env::args().skip(1);
     let addr = args.next().ok_or("an address to connect to")?;
-    let mut parsed = Args { addr, size: (0, 0), quality: 90, held: false, seconds: 30, resize: None, slow: None, keyframe: None };
+    let mut parsed = Args { addr, size: (0, 0), quality: 90, held: false, seconds: 30, frames: 0, resize: None, slow: None, keyframe: None, keys: false };
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} takes a value"));
         match flag.as_str() {
@@ -66,8 +76,10 @@ fn parse_args() -> Result<Args, String> {
             "--quality" => parsed.quality = value()?.parse().map_err(|_| "a quality 1..100")?,
             "--held" => parsed.held = true,
             "--seconds" => parsed.seconds = value()?.parse().map_err(|_| "a number of seconds")?,
+            "--frames" => parsed.frames = value()?.parse().map_err(|_| "a number of frames")?,
             "--resize" => parsed.resize = Some(at(&value()?, size)?),
             "--slow" => parsed.slow = Some(at(&value()?, |s| at(s, |ms| ms.parse().map_err(|_| format!("{ms}: not milliseconds"))))?),
+            "--keys" => parsed.keys = true,
             "--keyframe" => parsed.keyframe = Some(value()?.parse().map_err(|_| "seconds")?),
             other => return Err(format!("{other}: not a flag")),
         }
@@ -94,6 +106,9 @@ async fn main() {
         eprintln!("vp9-sink: {e}");
         std::process::exit(1);
     }
+    // Not a return: with `--keys` a thread is still reading the standard
+    // input, which the runtime would wait on for as long as nobody types.
+    std::process::exit(0);
 }
 
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
@@ -134,12 +149,14 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let began = Instant::now();
     let end = began + Duration::from_secs(args.seconds);
+    let last = began + Duration::from_secs(args.seconds * 10);
     let (mut resize, mut keyframe) = (args.resize, args.keyframe);
     let mut slowed = false;
+    let mut keys = args.keys.then(|| BufReader::new(tokio::io::stdin()).lines());
     let mut buf = Vec::with_capacity(1 << 20);
     let mut chunk = vec![0u8; 1 << 16];
     let (mut frames, mut bytes, mut keyframes, mut second) = (0u64, 0u64, 0u64, 0u64);
-    while Instant::now() < end {
+    while Instant::now() < end || (frames < args.frames && Instant::now() < last) {
         let now = began.elapsed().as_secs_f64();
         if let Some((secs, to)) = resize
             && now >= secs
@@ -163,8 +180,26 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             keyframe = None;
             socket.write_all(&client::framebuffer_update_request(false, 0, 0, width, height)).await?;
         }
+        let typed = async {
+            match &mut keys {
+                Some(lines) => lines.next_line().await,
+                None => std::future::pending().await,
+            }
+        };
         let read = tokio::select! {
             read = socket.read(&mut chunk) => read?,
+            line = typed => {
+                match line? {
+                    Some(line) => {
+                        let keysym = u32::from_str_radix(line.trim(), 16).map_err(|_| format!("{line}: not a keysym in hexadecimal"))?;
+                        socket.write_all(&client::key_event(true, keysym)).await?;
+                        socket.write_all(&client::key_event(false, keysym)).await?;
+                    }
+                    // Nobody is left to type.
+                    None => keys = None,
+                }
+                continue;
+            }
             () = tokio::time::sleep(Duration::from_millis(100)) => continue,
         };
         if read == 0 {

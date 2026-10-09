@@ -10,7 +10,7 @@ for _ in $(seq 40); do
 done
 sleep 1
 for _ in $(seq 10); do
-	wtype -k Page_Down
+	press -k Page_Down
 	sleep 0.3
 done
 sleep 1

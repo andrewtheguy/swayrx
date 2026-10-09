@@ -1,14 +1,9 @@
 # check=skip=InvalidDefaultArgInFrom
 # The capture container: a headless sway, the daemon started with
-# `--capture-vp9`, and the scripted desktop `docker/capture/run.sh` plays on
+# `--capture-frames`, and the scripted desktop `docker/capture/run.sh` plays on
 # it, so that what the VP9 encoder is handed by a real session — every frame's
-# pixels and rectangles, exact — is written for screen-vp9's encoder to be
-# measured on. `scripts/capture-vp9.sh` builds and runs it.
-#
-# Built with two contexts: the repository, and `screen-vp9`, a checkout of
-# that crate to build the daemon against in place of the pinned tag, for a
-# capture format the pinned release does not have yet. An empty directory
-# there builds against the tag.
+# pixels and rectangles, exact — is written for an encoder to be run again
+# on. `scripts/capture-frames.sh` builds and runs it.
 ARG BASE_IMAGE=debian:trixie
 FROM ${BASE_IMAGE} AS build
 
@@ -27,21 +22,11 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-too
 
 WORKDIR /build
 COPY . /build
-COPY --from=screen-vp9 . /screen-vp9
 
-# The patch is cargo configuration for this build and nowhere else: the
-# repository's pin is the tag, and moves only with a release.
 RUN --mount=type=cache,target=/build/target --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/usr/local/cargo/git \
     set -eux; \
-    patch=""; \
-    if [ -f /screen-vp9/Cargo.toml ]; then \
-        patch='patch."https://github.com/andrewtheguy/screen-vp9".screen-vp9.path="/screen-vp9"'; \
-        cargo build --release -p wlshare --config "$patch"; \
-        cargo build --release -p wlshare-rfb --example vp9-sink --config "$patch"; \
-    else \
-        cargo build --release -p wlshare; \
-        cargo build --release -p wlshare-rfb --example vp9-sink; \
-    fi; \
+    cargo build --release --locked -p wlshare; \
+    cargo build --release --locked -p wlshare-rfb --example vp9-sink; \
     mkdir -p /out; \
     cargo deb -p wlshare --no-build -o /out/wlshare.deb; \
     cp target/release/examples/vp9-sink /out/
@@ -54,7 +39,8 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Sway 1.11 on wlroots 0.19 from the repository's own APT repository (README),
 # whose headless backend keeps the cursor out of the capture as a deployment's
 # does; the daemon's package depends on that wlroots. foot is the terminal,
-# chromium the browser, mpv the video, wlrctl the pointer and wtype the keys.
+# chromium the browser, mpv the video and wlrctl the pointer; the keys are
+# typed by vp9-sink, through the daemon.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
     mkdir -p /etc/apt/keyrings && \
@@ -62,7 +48,7 @@ RUN apt-get update && \
     printf 'Types: deb\nURIs: https://andrewtheguy.github.io/wlshare\nSuites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/wlshare.gpg\n' > /etc/apt/sources.list.d/wlshare.sources && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        sway foot chromium mpv wlrctl wtype zstd ffmpeg procps \
+        sway foot chromium mpv wlrctl zstd ffmpeg procps \
         fonts-dejavu fonts-noto-core && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/wlshare.deb /tmp/wlshare.deb

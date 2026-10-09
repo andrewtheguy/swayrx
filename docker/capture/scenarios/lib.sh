@@ -5,12 +5,12 @@
 # A scenario script plays one kind of content on the sway desktop it is run
 # in, for LENGTH seconds (its one argument, 20 by default), and closes what
 # it opened. Run one by hand on any sway desktop a daemon is capturing —
-# `wlshare --capture-vp9 DIR` — or let docker/capture/run.sh run them all.
-# They need swaymsg, wlrctl (the pointer), wtype (the keys), foot, chromium,
-# mpv and ffmpeg.
+# `wlshare --capture-frames DIR` — or let docker/capture/run.sh run them all.
+# They need swaymsg, wlrctl (the pointer), foot, chromium, mpv and ffmpeg,
+# and for the keys either CAPTURE_KEYS or wtype (`press`, below).
 #
 #   quiet: terminal.sh, uncover.sh    little changes a frame, most of it still
-#   busy:  busy.sh, browser.sh, drag.sh, video.sh    most of the picture new
+#   busy:  flood.sh, browser.sh, drag.sh, video.sh    most of the picture new
 #
 # busy-lines.sh is the flood itself, for any terminal.
 
@@ -59,12 +59,35 @@ material() {
 	fi
 }
 
+# Press and let go of one key: a character, or `-k` and Return or Page_Down.
+# Through the session's client where CAPTURE_KEYS names what it reads keys
+# from (`vp9-sink --keys`: a keysym in hexadecimal a line), so that they come
+# as a person's do, on the daemon's keyboard; by wtype otherwise. Not by both
+# on one desktop: wtype's keyboard is gone when it exits, and with the
+# daemon's beside it, which has pressed nothing, sway is left with a seat
+# that has a keyboard and no keymap, which Chromium does not survive starting
+# on.
+press() {
+	if [[ -z "${CAPTURE_KEYS:-}" ]]; then
+		if [[ "$1" == -k ]]; then wtype -k "$2"; else wtype -- "$1"; fi
+		return
+	fi
+	local keysym
+	case "$1 ${2:-}" in
+		"-k Return") keysym=ff0d ;;
+		"-k Page_Down") keysym=ff56 ;;
+		-k*) log "press: no keysym for $2"; return 1 ;;
+		*) keysym=$(printf '%x' "'$1") ;;
+	esac
+	echo "$keysym" >"$CAPTURE_KEYS"
+}
+
 # Type text a character at a time, as a person does.
 type_slowly() {
 	local text=$1 i c
 	for ((i = 0; i < ${#text}; i++)); do
 		c=${text:i:1}
-		if [[ "$c" == $'\n' ]]; then wtype -k Return; else wtype -- "$c"; fi
+		if [[ "$c" == $'\n' ]]; then press -k Return; else press "$c"; fi
 		sleep 0.05
 	done
 }
