@@ -418,9 +418,9 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   encoded below the ceiling has been delivered — its fence answered, or
   without Fence its write finished — and nothing has been sent for 500 ms
   since, the unchanged picture goes out again, at the next update the client
-  asks for, as one inter frame at the ceiling: libvpx codes the residual of
-  unchanged blocks at the finer quantizer, so it sharpens the whole desktop
-  without a keyframe
+  asks for, as one inter frame at the ceiling, coded whole and not by its
+  damage: libvpx codes the residual of unchanged blocks at the finer
+  quantizer, so it sharpens the whole desktop without a keyframe
   (`a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe`
   guards that). The encoder is retuned for that one frame and returned to the
   walk's quality after it, and the frame is no verdict: the screen stopping
@@ -429,8 +429,10 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   every one. The clear frames before the quiet do not span it either: the
   walk's run of clear frames starts over at the settle, so a burst earns its
   step back up from its own frames rather than taking one on its first. A
-  frame that went out at the ceiling owes nothing, and a desktop that goes
-  quiet after one sends nothing. remotex's settle for its own whole-desktop
+  whole frame that went out at the ceiling owes nothing, and a desktop that
+  goes quiet after one sends nothing; a frame of damage at the ceiling
+  sharpens only the blocks it codes, so a picture coarsened before it is
+  still owed its settle. remotex's settle for its own whole-desktop
   streams.
 - **Keyframes only when a decoder needs one**: the first frame after the
   encoding is listed, the first at a new size or chroma (the encoder is made
@@ -439,8 +441,15 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
 
 A normal VP9 update is sent when anything is damaged; a non-incremental request,
 a chroma or quality-ceiling change and the settle described above can also owe
-one. The frame is the whole picture: the encoder's inter-frame coding is what
-makes an unchanged region cost nothing. The encode runs on the session's worker,
+one. The frame is the whole picture, and what did not change costs it
+nearly nothing, in bytes or in time: the session hands the encoder the damage
+since the client's last frame, the encoder converts the rows the damage spans
+and codes the blocks it touches, and every other block is skipped as the client
+holds it — libvpx's active map, a byte per 16×16 block. A 4K frame with one
+small change took 26 ms to encode whole and 6 to convert, and takes 11 and
+nothing told where it changed; a 1440p one 12 and 2, and takes 5. A keyframe,
+an encoder's first frame, a settle and a client the damage log no longer
+reaches back for are coded whole. The encode runs on the session's worker,
 which is told it is blocking, and the fence keeps one frame in flight as it does
 a standard pixel update. A `SetEncodings` that drops the encoding is answered
 with the whole framebuffer in the standard encoding it selected — ZRLE when
