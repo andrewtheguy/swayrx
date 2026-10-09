@@ -77,6 +77,10 @@ static MASK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// followers. Only the owner can connect.
 pub fn bind(path: &Path) -> anyhow::Result<(UnixListener, Bound)> {
     use std::os::unix::fs::DirBuilderExt as _;
+    // Held from here: the directory is made under the process's own mask and
+    // not the one another bind has swapped in for its socket, which would
+    // make it a directory nothing can be created in.
+    let _one = MASK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(dir) = path.parent() {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -93,7 +97,6 @@ pub fn bind(path: &Path) -> anyhow::Result<(UnixListener, Bound)> {
     // meanwhile is a file more closed than it asked for; two of these at once
     // would each put back the other's, so one runs at a time.
     let listener = {
-        let _one = MASK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: umask only swaps the process's file mode creation mask.
         let mask = unsafe { libc::umask(0o177) };
         let listener = UnixListener::bind(path);
@@ -212,6 +215,13 @@ mod tests {
         dir
     }
 
+    /// Make a test's directory while no bind has the process's mask: one made
+    /// under a bind's would be a directory nothing can be created in.
+    fn make(dir: &Path) {
+        let _one = MASK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
     /// The process's file mode creation mask, read while no bind has it.
     fn mask() -> libc::mode_t {
         let _one = MASK.lock().unwrap();
@@ -310,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn a_follower_reads_a_daemon_that_is_gone_as_a_desktop_nobody_holds() {
         let dir = dir("follow");
-        std::fs::create_dir_all(&dir).unwrap();
+        make(&dir);
         let path = dir.join("state.sock");
         let (held, mut seen) = watch::channel(None);
         let following = tokio::spawn(follow(path.clone(), held));
@@ -341,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn a_follower_says_nothing_of_the_desktop_until_the_daemon_has() {
         let dir = dir("unknown");
-        std::fs::create_dir_all(&dir).unwrap();
+        make(&dir);
         let path = dir.join("state.sock");
         // A daemon that is there and has not spoken yet.
         let listener = UnixListener::bind(&path).unwrap();
