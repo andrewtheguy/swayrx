@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 wlshare-rfb = { path = "../wlshare-rfb" }
 # The quality walk, the same one the remotex gateway runs on its own streams.
-screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.8" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.12" }
 anyhow.workspace = true
 log.workspace = true
 thiserror.workspace = true

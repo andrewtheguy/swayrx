@@ -34,7 +34,7 @@
 
 use thiserror::Error;
 
-pub use screen_vp9::{Chroma, QUALITY_MAX, QUALITY_MIN};
+pub use screen_vp9::{Chroma, QUALITY_MAX, QUALITY_MIN, Rect};
 
 /// Listed beside [`crate::ENCODING_VP9`], asks for the stream at 4:2:0 (VP9
 /// profile 0) in place of 4:4:4: the ASCII bytes `WLS0`. The remotex gateway
@@ -162,37 +162,42 @@ fn decoder_threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
 }
 
-/// One connection's VP9 stream, server side: an encoder at one picture size,
-/// and the planes the framebuffer is converted into in front of it. A
-/// framebuffer of another size needs another encoder, whose first frame is a
-/// keyframe by construction.
+/// One connection's VP9 stream, server side: screen-vp9's stream at one
+/// picture size, which converts the framebuffer and codes it. A framebuffer of
+/// another size needs another encoder, whose first frame is a keyframe by
+/// construction.
 pub struct Vp9Encoder {
-    encoder: screen_vp9::Encoder,
-    picture: screen_vp9::Picture,
+    stream: screen_vp9::Stream,
 }
 
 impl Vp9Encoder {
     /// An encoder for a `width`×`height` picture at `chroma` and `quality`
     /// (1–100).
     pub fn new(width: u16, height: u16, chroma: Chroma, quality: u8) -> Result<Self, Vp9Error> {
-        let picture = screen_vp9::Picture::new(width, height, chroma)?;
-        let encoder = screen_vp9::Encoder::new(width, height, chroma, quality, encoder_threads())?;
-        Ok(Self { encoder, picture })
+        Ok(Self { stream: screen_vp9::Stream::new(width, height, chroma, quality, encoder_threads())? })
     }
 
     /// The chroma this encoder codes.
     pub fn chroma(&self) -> Chroma {
-        self.encoder.chroma()
+        self.stream.chroma()
     }
 
     /// The picture size this encoder codes.
     pub fn size(&self) -> (u16, u16) {
-        self.encoder.size()
+        self.stream.size()
     }
 
     /// The quality the next frame is coded at, clamped to the dial.
     pub fn quality(&self) -> u8 {
-        self.encoder.quality()
+        self.stream.quality()
+    }
+
+    /// The coarsest quality any block of the client's picture was last coded
+    /// at: below the stream's ceiling while a frame the link coarsened has left
+    /// blocks no finer frame has coded since, which a frame of damage does not
+    /// do for the blocks it skips and a whole frame does for all of them.
+    pub fn coarsest(&self) -> u8 {
+        self.stream.coarsest()
     }
 
     /// Move the dial on the running encoder, clamped to it. The next frame is
@@ -200,21 +205,33 @@ impl Vp9Encoder {
     /// encoder would cost a keyframe, the most bytes a frame can be, at the
     /// moment a slow link can least afford them.
     pub fn set_quality(&mut self, quality: u8) -> Result<(), Vp9Error> {
-        Ok(self.encoder.set_quality(quality)?)
+        Ok(self.stream.set_quality(quality)?)
     }
 
     /// Encode the picture — [`Self::size`] of `B, G, R, X` pixels whose rows
     /// are `stride` bytes apart — and append the rectangle's body to `out`: the
     /// length word and the frame. `keyframe` makes it one a decoder can start
-    /// from; an encoder's first frame is one either way. Returns whether a body
-    /// was appended: `false`, with `out` as it was, when the encoder produced no
-    /// frame, since an empty rectangle is not a frame a client can decode and
-    /// the pixels are the next frame's to carry.
-    pub fn encode_rect(&mut self, pixels: &[u8], stride: usize, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
-        self.picture.read_bgrx(pixels, stride)?;
+    /// from; an encoder's first frame is one either way.
+    ///
+    /// `changed` is the damage since the picture encoded before, or `None`
+    /// for a picture that may differ anywhere. With it only the rows the
+    /// rectangles span are read from `pixels`, and at 4:2:0 the row that
+    /// shares a chroma row with one of them — an even row and the odd one
+    /// under it are read together — so that row must hold the picture too.
+    /// The other rows may hold anything. Only the blocks the rectangles touch
+    /// are coded: the rest of the
+    /// frame is the picture the client already holds, at the quality it holds
+    /// it. A keyframe, an encoder's first frame and the frame after one that
+    /// produced nothing are the whole picture whatever `changed` says, and
+    /// read all of `pixels`.
+    ///
+    /// Returns whether a body was appended: `false`, with `out` as it was, when
+    /// the encoder produced no frame, since an empty rectangle is not a frame a
+    /// client can decode and the pixels are the next frame's to carry.
+    pub fn encode_rect(&mut self, pixels: &[u8], stride: usize, changed: Option<&[Rect]>, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
         let length_at = out.len();
         out.extend_from_slice(&[0; 4]);
-        match self.encoder.encode(&self.picture, keyframe, out) {
+        match self.stream.encode_bgrx(pixels, stride, changed, keyframe, out) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 out.truncate(length_at);
@@ -296,7 +313,7 @@ mod tests {
     fn encode(encoder: &mut Vp9Encoder, pixels: &[u8], keyframe: bool) -> Vec<u8> {
         let (width, _) = encoder.size();
         let mut out = vec![0xEE];
-        assert!(encoder.encode_rect(pixels, usize::from(width) * 4, keyframe, &mut out).expect("an encode"), "a frame");
+        assert!(encoder.encode_rect(pixels, usize::from(width) * 4, None, keyframe, &mut out).expect("an encode"), "a frame");
         assert_eq!(out[0], 0xEE, "appended, not overwritten");
         let len = u32::from_be_bytes(out[1..5].try_into().unwrap()) as usize;
         assert_eq!(len, out.len() - 5, "the length word is the frame's");
@@ -354,6 +371,64 @@ mod tests {
         }
     }
 
+    /// A frame of damage reads the rows its rectangles span and nothing else
+    /// of the buffer, and leaves the rest of the client's picture as it was.
+    /// An encoder's first frame and a keyframe have no picture to be damage
+    /// to, and are read whole.
+    #[test]
+    fn a_frame_of_damage_reads_and_codes_only_what_it_names() {
+        let (width, height) = (96usize, 80usize);
+        let stride = width * 4;
+        const BACK: [u8; 4] = [80, 40, 20, 0];
+        const LIT: [u8; 4] = [240, 240, 240, 0];
+        let damage = Rect { x: 32, y: 16, width: 32, height: 16 };
+        let lit = |pixels: &mut [u8], rect: Rect| {
+            for y in usize::from(rect.y)..usize::from(rect.y + rect.height) {
+                for x in usize::from(rect.x)..usize::from(rect.x + rect.width) {
+                    pixels[y * stride + x * 4..][..4].copy_from_slice(&LIT);
+                }
+            }
+        };
+        let at = |out: &[u8], x: usize, y: usize| -> [u8; 3] { out[y * stride + x * 4..][..3].try_into().unwrap() };
+        let near = |got: [u8; 3], want: [u8; 4]| (0..3).all(|c| got[c].abs_diff(want[c]) <= 24);
+        let frame = |encoder: &mut Vp9Encoder, pixels: &[u8], changed: Option<&[Rect]>, keyframe: bool| {
+            let mut out = Vec::new();
+            assert!(encoder.encode_rect(pixels, stride, changed, keyframe, &mut out).expect("an encode"), "a frame");
+            out.split_off(4)
+        };
+        let mut encoder = Vp9Encoder::new(width as u16, height as u16, Chroma::Full, QUALITY_MAX).unwrap();
+        let mut decoder = Vp9Decoder::new().unwrap();
+        let mut out = vec![0; stride * height];
+        let whole = BACK.repeat(width * height);
+
+        // The first frame is told of damage it cannot be damage to.
+        let first = frame(&mut encoder, &whole, Some(&[damage]), false);
+        assert!(screen_vp9::frame_header(&first).is_some_and(|header| header.keyframe));
+        decoder.decode_rect(&first, width, height, &mut out, stride).unwrap();
+        assert!(near(at(&out, 4, 70), BACK) && near(at(&out, 48, 24), BACK), "the first frame was not the whole picture");
+
+        // Damage, in a buffer whose other rows are not the picture.
+        let mut rows = [0xAAu8, 0x55, 0xAA, 0].repeat(width * height);
+        let span = usize::from(damage.y) * stride..usize::from(damage.y + damage.height) * stride;
+        rows[span.clone()].copy_from_slice(&whole[span]);
+        lit(&mut rows, damage);
+        let second = frame(&mut encoder, &rows, Some(&[damage]), false);
+        assert!(screen_vp9::frame_header(&second).is_some_and(|header| !header.keyframe));
+        decoder.decode_rect(&second, width, height, &mut out, stride).unwrap();
+        assert!(near(at(&out, 48, 24), LIT), "the damage came back {:?}", at(&out, 48, 24));
+        for (x, y) in [(4, 4), (4, 24), (90, 24), (48, 4), (48, 70)] {
+            assert!(near(at(&out, x, y), BACK), "({x}, {y}), outside the damage, came back {:?}", at(&out, x, y));
+        }
+
+        // A keyframe is the whole buffer, whatever it is told.
+        let mut all = whole.clone();
+        lit(&mut all, Rect { x: 0, y: 64, width: 96, height: 16 });
+        let third = frame(&mut encoder, &all, Some(&[damage]), true);
+        assert!(screen_vp9::frame_header(&third).is_some_and(|header| header.keyframe));
+        decoder.decode_rect(&third, width, height, &mut out, stride).unwrap();
+        assert!(near(at(&out, 48, 24), BACK) && near(at(&out, 48, 70), LIT), "the keyframe was not the whole picture");
+    }
+
     #[test]
     fn a_frame_of_another_size_or_chroma_or_no_frame_at_all_is_an_error() {
         let mut encoder = Vp9Encoder::new(32, 16, Chroma::Full, 60).unwrap();
@@ -364,7 +439,7 @@ mod tests {
         assert!(decoder.decode_rect(&[0xFF, 0x00, 0x12], 32, 16, &mut out, 128).is_err());
         assert!(matches!(decoder.decode_rect(&frame, 32, 16, &mut out[..10], 128), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
         assert!(matches!(Vp9Encoder::new(0, 16, Chroma::Full, 60), Err(Vp9Error::Codec(screen_vp9::Error::Empty(0, 16)))));
-        assert!(matches!(encoder.encode_rect(&[0; 12], 128, false, &mut Vec::new()), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
+        assert!(matches!(encoder.encode_rect(&[0; 12], 128, None, false, &mut Vec::new()), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
 
         // A 4:2:0 frame, which the gateway asks for, is a VP9 frame of the
         // same framing — and not one a 4:4:4 decoder takes.

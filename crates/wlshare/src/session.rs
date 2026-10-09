@@ -41,7 +41,9 @@
 //! over the whole framebuffer, the next frame of one VP9 stream
 //! ([`wlshare_rfb::vp9`]). The encoder is made again at every new size or chroma,
 //! whose first frame is a keyframe; a non-incremental request or the encoding's
-//! being listed anew also asks for one. The encode runs on this task's worker,
+//! being listed anew also asks for one. A frame between them is handed the
+//! damage since the client's last one, and the encoder converts and codes that
+//! alone: a small change costs a small encode. The encode runs on this task's worker,
 //! told it is blocking, and the fence keeps it to one frame in flight as it does
 //! a standard pixel update. Its quality starts at the configured one and follows
 //! the link through screen-vp9's quality walk: each frame's fence, answered
@@ -53,8 +55,8 @@
 //! stops right after the link coarsened it would keep that picture. Once a frame
 //! below the configured quality has been delivered and nothing has changed for
 //! [`SETTLE_IDLE`], the dial is taken back to the configured quality and the
-//! unchanged picture is sent again as one inter frame, which sharpens every
-//! block without a keyframe. A list that drops VP9
+//! unchanged picture is sent again as one inter frame, coded whole, which
+//! sharpens every block without a keyframe. A list that drops VP9
 //! is answered with the whole framebuffer in the standard encoding it selected
 //! — ZRLE when listed, Raw otherwise — since the picture the client has is a
 //! lossy one.
@@ -141,7 +143,7 @@ use wlshare_rfb::msg::{self, ClientMsg, Screen};
 use wlshare_rfb::outputs::output_list;
 use wlshare_rfb::pixel::PixelFormat;
 use wlshare_rfb::rsa_aes::{self, FrameReader, Sealer, ServerKey};
-use wlshare_rfb::vp9::{Chroma, Vp9Encoder, Vp9Stream};
+use wlshare_rfb::vp9::{self, Chroma, Vp9Encoder, Vp9Stream};
 use wlshare_rfb::zrle::{ZrleEncoder, encode_raw_rect};
 use wlshare_rfb::{
     ENCODING_AUDIO, ENCODING_CAMERA, ENCODING_CONTINUOUS_UPDATES, ENCODING_DENSITY, ENCODING_DESKTOP_SIZE, ENCODING_EXTENDED_DESKTOP_SIZE, ENCODING_FENCE, ENCODING_MICROPHONE,
@@ -573,7 +575,9 @@ struct Session {
     announce_eds: bool,
     events: broadcast::Receiver<Event>,
     frames: watch::Receiver<u64>,
-    /// Pixels copied out of the framebuffer, rect by rect, for encoding.
+    /// Pixels copied out of the framebuffer for encoding: rect by rect, or
+    /// for a VP9 frame the whole picture's rows in place, of which only the
+    /// damaged ones are the frame's.
     scratch: Vec<u8>,
     out: Vec<u8>,
 }
@@ -1302,6 +1306,8 @@ impl Session {
         let generation;
         let size;
         let full;
+        // Where a VP9 frame's picture changed, or `None` for a whole one.
+        let changed: Option<Vec<Rect>>;
         {
             let fb = self.shared.desks[self.desk].framebuffer.lock().unwrap();
             if !fb.painted {
@@ -1316,9 +1322,11 @@ impl Session {
             }
             full = resized.is_some() || self.pending == Some(false) || self.seen == 0;
             // A settle is the whole picture whether or not anything changed,
-            // and an inter frame all the same.
-            let rects = if full || self.settle_owed {
-                vec![Rect::whole(fb.width, fb.height)]
+            // and an inter frame all the same. So is a VP9 frame that starts
+            // its stream over, which has no picture to be damage to.
+            let starting = self.use_vp9 && (self.keyframe_owed || self.vp9.as_ref().is_none_or(|encoder| encoder.size() != size));
+            let damage = if full || self.settle_owed || starting {
+                None
             } else {
                 match fb.damage_since(self.seen) {
                     Some(rects) if rects.is_empty() => {
@@ -1326,28 +1334,40 @@ impl Session {
                         answered(self);
                         return Ok(());
                     }
-                    Some(rects) => rects,
-                    None => vec![Rect::whole(fb.width, fb.height)],
+                    damage => damage,
                 }
             };
-            let rects = if self.use_vp9 {
-                // Something changed, and a VP9 frame is the whole picture.
-                vec![Rect::whole(fb.width, fb.height)]
-            } else if rects.len() > MAX_RECTS {
-                crate::framebuffer::merge(rects, 1)
-            } else {
-                rects
-            };
-            self.scratch.clear();
             let stride = fb.stride();
-            for rect in rects {
-                let offset = self.scratch.len();
-                let row_len = usize::from(rect.width) * 4;
-                for row in usize::from(rect.y)..usize::from(rect.y) + usize::from(rect.height) {
-                    let start = row * stride + usize::from(rect.x) * 4;
-                    self.scratch.extend_from_slice(&fb.pixels[start..start + row_len]);
+            if self.use_vp9 {
+                // A VP9 frame is the whole picture, of which the encoder reads
+                // the rows that changed: those are copied to their own place,
+                // and the rest of `scratch` is whatever an earlier frame left.
+                // Copied out to whole pairs of rows, an even one and the odd
+                // one under it, which a 4:2:0 stream reads together.
+                let row_len = usize::from(fb.width) * 4;
+                self.scratch.resize(row_len * usize::from(fb.height), 0);
+                let whole = [Rect::whole(fb.width, fb.height)];
+                for rect in damage.as_deref().unwrap_or(&whole) {
+                    let bottom = (usize::from(rect.y) + usize::from(rect.height)).next_multiple_of(2).min(usize::from(fb.height));
+                    for row in usize::from(rect.y) & !1..bottom {
+                        self.scratch[row * row_len..][..row_len].copy_from_slice(&fb.pixels[row * stride..][..row_len]);
+                    }
                 }
-                pieces.push(Piece { rect, offset });
+                changed = damage;
+            } else {
+                let rects = damage.unwrap_or_else(|| vec![Rect::whole(fb.width, fb.height)]);
+                let rects = if rects.len() > MAX_RECTS { crate::framebuffer::merge(rects, 1) } else { rects };
+                self.scratch.clear();
+                for rect in rects {
+                    let offset = self.scratch.len();
+                    let row_len = usize::from(rect.width) * 4;
+                    for row in usize::from(rect.y)..usize::from(rect.y) + usize::from(rect.height) {
+                        let start = row * stride + usize::from(rect.x) * 4;
+                        self.scratch.extend_from_slice(&fb.pixels[start..start + row_len]);
+                    }
+                    pieces.push(Piece { rect, offset });
+                }
+                changed = None;
             }
         }
 
@@ -1374,14 +1394,14 @@ impl Session {
         }
 
         self.out.clear();
-        self.out.extend_from_slice(&msg::update_header(pieces.len() as u16));
+        self.out.extend_from_slice(&msg::update_header(if self.use_vp9 { 1 } else { pieces.len() as u16 }));
         // Whether the update is a VP9 frame, and if so whether it is a keyframe
         // and whether its delivery is a verdict about the link: a delta frame at
         // the walk's quality. The settle's frame is at the ceiling, for the
         // rounds after it to leave.
         let settling = self.use_vp9 && self.settle_owed;
         let vp9 = if self.use_vp9 {
-            let Some(keyframe) = self.encode_vp9(full, settling)? else {
+            let Some(keyframe) = self.encode_vp9(full, changed.as_deref())? else {
                 // Nothing to send, and nothing changes hands: the damage stays
                 // unseen, the request pending and the keyframe owed, for the
                 // frame the next change brings.
@@ -1401,9 +1421,11 @@ impl Session {
         let sent = Instant::now();
         writer.send(&self.out).await.context("writing an update")?;
         if let Some((keyframe, _)) = vp9 {
-            // Judged by the quality the frame was encoded at, which is what the
-            // client is holding: the ceiling for a settle, whatever the walk holds.
-            let quality = if settling { self.stream.quality } else { self.vp9.as_ref().expect("a VP9 frame was encoded").quality() };
+            // Judged by the coarsest quality any of the picture was last
+            // encoded at, which is what the client is holding: a frame of
+            // damage sharpens the blocks it codes and no others, and a settle
+            // all of them, at the ceiling whatever the walk holds.
+            let quality = self.vp9.as_ref().expect("a VP9 frame was encoded").coarsest();
             if keyframe {
                 // The frames behind it queue behind its crossing, a settle's too.
                 self.walk.keyframe(sent);
@@ -1432,14 +1454,17 @@ impl Session {
         Ok(())
     }
 
-    /// The whole framebuffer, copied into `scratch`, as the next frame of the
-    /// VP9 stream: a keyframe when the update is a full one or one is owed.
-    /// Returns whether it was one, or `None` when the encoder produced no
-    /// frame: `out` is left as it was, and so is the keyframe owed. A
-    /// `settling` frame is coded at the configured quality, with the encoder
-    /// returned to the walk's after it — a retune and not a rebuild either way,
-    /// so no keyframe is spent on it.
-    fn encode_vp9(&mut self, full: bool, settling: bool) -> anyhow::Result<Option<bool>> {
+    /// The framebuffer in `scratch` as the next frame of the VP9 stream: a
+    /// keyframe when the update is a full one or one is owed. `changed` is the
+    /// damage the frame carries, whose rows `scratch` holds, or `None` for a
+    /// whole picture, which `scratch` then is. Returns whether the frame was
+    /// a keyframe, or `None` when the encoder produced no frame: `out` is left
+    /// as it was, and so is the keyframe owed. A settle, which is a whole
+    /// picture, is coded at the configured quality, with the encoder returned
+    /// to the walk's after it — a retune and not a rebuild either way, so no
+    /// keyframe is spent on it.
+    fn encode_vp9(&mut self, full: bool, changed: Option<&[Rect]>) -> anyhow::Result<Option<bool>> {
+        let settling = self.settle_owed;
         let (width, height) = self.known_size;
         if self.vp9.as_ref().is_none_or(|encoder| encoder.size() != (width, height)) {
             let encoder = Vp9Encoder::new(width, height, self.stream.chroma, self.walk.quality())
@@ -1453,9 +1478,11 @@ impl Session {
         if settling {
             encoder.set_quality(self.stream.quality).context("moving the VP9 quality for a settle")?;
         }
-        // Tens of milliseconds for a large desktop, which is the worker's to
-        // spend and not the runtime's to wait on.
-        let encoded = tokio::task::block_in_place(|| encoder.encode_rect(pixels, usize::from(width) * 4, keyframe, out))
+        let changed: Option<Vec<vp9::Rect>> =
+            changed.map(|rects| rects.iter().map(|r| vp9::Rect { x: r.x, y: r.y, width: r.width, height: r.height }).collect());
+        // Tens of milliseconds for a large desktop that changed all over, which
+        // is the worker's to spend and not the runtime's to wait on.
+        let encoded = tokio::task::block_in_place(|| encoder.encode_rect(pixels, usize::from(width) * 4, changed.as_deref(), keyframe, out))
             .with_context(|| format!("encoding a {width}x{height} VP9 frame"));
         if settling {
             encoder.set_quality(self.walk.quality()).context("returning the VP9 quality after a settle")?;
