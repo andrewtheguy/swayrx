@@ -126,10 +126,13 @@
 //! a [`Reader`] and a [`Writer`] either way; the writer takes whole messages,
 //! which is what a frame is cut from.
 
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use log::{debug, info, warn};
@@ -215,6 +218,11 @@ pub struct SessionConfig {
     /// desktop waits for it before its ServerInit.
     pub output: Option<String>,
     pub output_wait: Duration,
+    /// Where each session writes what its VP9 stream is handed, exact
+    /// ([`screen_vp9::capture`]), or `None` for no capture: a developer's
+    /// flag, for the encoder to be measured on the pictures a desktop is
+    /// shown as.
+    pub capture_vp9: Option<PathBuf>,
 }
 
 /// The most rectangles one update carries before they collapse into one.
@@ -322,6 +330,7 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
         zrle: None,
         use_zrle: false,
         vp9: None,
+        capture: None,
         use_vp9: false,
         stream,
         keyframe_owed: false,
@@ -494,6 +503,10 @@ struct Session {
     /// The VP9 stream's encoder, at the framebuffer's size once a frame has
     /// been sent.
     vp9: Option<Vp9Encoder>,
+    /// What the VP9 encoder is handed, written as it is handed it, while the
+    /// daemon was started with a capture directory: opened at the session's
+    /// first VP9 frame, and spanning every encoder the session makes.
+    capture: Option<screen_vp9::capture::Writer<BufWriter<File>>>,
     /// The client listed the VP9 encoding, which it gets instead of Raw or ZRLE.
     use_vp9: bool,
     /// What the VP9 stream is to be: its chroma, the ceiling of its quality
@@ -1480,6 +1493,23 @@ impl Session {
         }
         let changed: Option<Vec<vp9::Rect>> =
             changed.map(|rects| rects.iter().map(|r| vp9::Rect { x: r.x, y: r.y, width: r.width, height: r.height }).collect());
+        if let Some(dir) = &self.config.capture_vp9 {
+            let capture = match &mut self.capture {
+                Some(capture) => capture,
+                None => {
+                    let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+                    let path = dir.join(format!("{millis}-client{}.vp9cap", self.id.0));
+                    let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+                    info!("client {}: capturing what the VP9 encoder is handed into {}", self.id.0, path.display());
+                    let writer = screen_vp9::capture::Writer::new(BufWriter::with_capacity(1 << 20, file)).context("beginning the VP9 capture")?;
+                    self.capture.insert(writer)
+                }
+            };
+            // The frame as the encoder is handed it, the settle's dial
+            // included; what it says is what the stream reads.
+            tokio::task::block_in_place(|| capture.frame((width, height), encoder.quality(), keyframe, changed.as_deref(), pixels, usize::from(width) * 4))
+                .context("writing the VP9 capture")?;
+        }
         // Tens of milliseconds for a large desktop that changed all over, which
         // is the worker's to spend and not the runtime's to wait on.
         let encoded = tokio::task::block_in_place(|| encoder.encode_rect(pixels, usize::from(width) * 4, changed.as_deref(), keyframe, out))

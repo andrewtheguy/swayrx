@@ -195,6 +195,13 @@ first; build the daemon with
 PipeWire's and FFmpeg's `-sys` crates generate their bindings with bindgen, which
 loads it at build time.
 
+`scripts/capture-vp9.sh` builds and runs the capture container
+(`docker/capture/`): a headless sway and the daemon started with
+`--capture-vp9`, playing a scripted desktop at each size, so that what the
+VP9 encoder was handed — every frame's pixels and damage, exact — lands in
+`dist/captures/` for screen-vp9's encoder to be measured on
+(`docs/architecture.md`, "Capturing what the encoder is handed").
+
 Packages for Debian trixie on amd64 and arm64 are built in Docker by
 `scripts/build-debs.sh`, into `dist/<arch>/wlshare-trixie-<arch>.deb`. The
 **Release wlshare** workflow builds the same and publishes them as the GitHub

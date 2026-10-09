@@ -56,6 +56,12 @@ struct Args {
     /// Listen on this address instead of the configured one.
     #[arg(long)]
     listen: Option<std::net::SocketAddr>,
+    /// Write what every VP9 stream is handed into this directory, exact: each
+    /// session's frames as screen-vp9's capture format, one
+    /// `<unix millis>-client<id>.vp9cap` per session, for the encoder to be
+    /// measured on. Uncompressed and large: run `zstd` on them afterwards.
+    #[arg(long, value_name = "DIR")]
+    capture_vp9: Option<PathBuf>,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -93,6 +99,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(listen) = args.listen {
         config.listen = listen;
     }
+    if let Some(dir) = &args.capture_vp9 {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        info!("capturing what every VP9 stream is handed into {}", dir.display());
+    }
     let security = security(&config, &path)?;
 
     // The compositor thread comes up first and hands back what it learned about
@@ -100,7 +110,7 @@ fn main() -> anyhow::Result<()> {
     let (compositor, shared) = compositor::start(&config)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let result = runtime.block_on(serve(config, security, shared.clone(), compositor));
+    let result = runtime.block_on(serve(config, args.capture_vp9, security, shared.clone(), compositor));
     if let Err(e) = &result {
         error!("{e:#}");
     }
@@ -258,6 +268,7 @@ fn write_private(path: &std::path::Path, contents: &[u8]) -> anyhow::Result<()> 
 
 async fn serve(
     config: config::Config,
+    capture_vp9: Option<PathBuf>,
     security: Security,
     shared: Arc<shared::Shared>,
     mut compositor: compositor::Handle,
@@ -290,6 +301,7 @@ async fn serve(
         handshake_timeout: std::time::Duration::from_secs(config.handshake_timeout_secs),
         output: config.output.clone(),
         output_wait: std::time::Duration::from_secs(config.output_wait_secs),
+        capture_vp9,
     });
     loop {
         tokio::select! {

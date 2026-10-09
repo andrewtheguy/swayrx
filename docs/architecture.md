@@ -457,6 +457,38 @@ listed, Raw otherwise — since the client is holding a lossy picture.
 
 libvpx comes from `libvpx-prebuilt`'s static archive, through screen-vp9.
 
+### Capturing what the encoder is handed
+
+A daemon started with `--capture-vp9 DIR` writes, for every session, what
+its VP9 encoder is handed, exact: each frame's size, the dial at the time,
+whether a keyframe was asked, the damage rectangles or that there were none,
+and the rows the rectangles span as the framebuffer holds them, `B, G, R, X`.
+The file is screen-vp9's capture format (`screen_vp9::capture`), one
+`<unix millis>-client<id>.vp9cap` per session, written at the one call that
+hands the encoder its pixels and so spanning every encoder the session makes
+across resizes. Nothing on the way is lossy, which is the point: the Rust
+encoder screen-vp9 is to replace libvpx with is measured, by that crate's
+`captures_against_libvpx`, on the pictures a desktop is actually shown as
+and the rectangles they came with, not on a decode of a stream. The files
+are uncompressed and large — a 4K whole frame is 33 MB — and are `zstd`
+compressed afterwards; the reader takes either.
+
+`docker/capture/` runs that without a person: a headless sway on wlroots
+0.19, the daemon with the flag and no authentication on loopback, and
+`vp9-sink` (`crates/wlshare-rfb/examples/`), the one client the container
+has, which lists VP9 at a quality with Fence, ContinuousUpdates and
+ExtendedDesktopSize, sets the desktop's size, echoes the fences, throws
+the frames away, and on cue reads late for a while. `run.sh` plays the scenarios — a terminal typed into and
+scrolled, one flooded with random coloured lines, a page scrolled, a window
+dragged and one uncovered, a video in a window, and the video while the sink
+reads late so the fences come back late and the dial goes down, then back
+up, then the video stopped for the settle — at each size, each scenario its own session and
+so its own file. `scripts/capture-vp9.sh` builds and runs it, against a
+local screen-vp9 checkout when the capture format is ahead of the pinned
+tag. The remotex gateway is not instrumented: its Mac in Standard mode and
+its Windows over RDP hand it exact pixels of the same kind of desktop, so a
+wlshare capture at their sizes stands for them.
+
 ### The client's paint
 
 The walk above is only as honest as the fence it times, and a fence echoed the

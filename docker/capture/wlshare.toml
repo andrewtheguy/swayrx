@@ -1,0 +1,6 @@
+# The daemon as the capture container runs it: unauthenticated on loopback,
+# resizable by its one client, paced at the default rate.
+listen = "127.0.0.1:5900"
+resize = true
+max_fps = 30
+name = "capture"

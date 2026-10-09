@@ -1,6 +1,6 @@
-//! The client's half of the wire, which the tests read the server's with: the
-//! messages a client sends, built into bytes, and the server's, parsed from a
-//! byte buffer.
+//! The client's half of the wire, which the tests read the server's with and
+//! `examples/vp9-sink.rs` connects with: the messages a client sends, built
+//! into bytes, and the server's, parsed from a byte buffer.
 //!
 //! This is [`crate::msg`] seen from the other end — it frames exactly what
 //! wlshare sends and nothing a server of another kind might. The builders are

@@ -48,4 +48,6 @@ screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.1
 # — `symphonia-core` for the decoder trait and the packet it takes.
 symphonia-bundle-flac = "0.6"
 symphonia-core = "0.6"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }
+# `net` and `time` for `examples/vp9-sink.rs`, the client the capture
+# container runs against the daemon.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
