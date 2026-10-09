@@ -40,7 +40,8 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # whose headless backend keeps the cursor out of the capture as a deployment's
 # does; the daemon's package depends on that wlroots. foot is the terminal,
 # chromium the browser, mpv the video and wlrctl the pointer; the keys are
-# typed by vp9-sink, through the daemon.
+# typed by vp9-sink, through the daemon. bsdextrautils is `column`, which
+# fills the terminals the scenarios show.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
     mkdir -p /etc/apt/keyrings && \
@@ -48,7 +49,7 @@ RUN apt-get update && \
     printf 'Types: deb\nURIs: https://andrewtheguy.github.io/wlshare\nSuites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/wlshare.gpg\n' > /etc/apt/sources.list.d/wlshare.sources && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        sway foot chromium mpv wlrctl zstd ffmpeg procps \
+        sway foot chromium mpv wlrctl zstd ffmpeg procps bsdextrautils \
         fonts-dejavu fonts-noto-core && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/wlshare.deb /tmp/wlshare.deb
@@ -56,9 +57,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends /tmp/wlshare.de
 COPY --from=build /out/vp9-sink /usr/local/bin/vp9-sink
 COPY docker/capture/ /opt/capture/
 
-# sway refuses root, and nothing here needs it.
+# Nothing here needs root. scripts/capture-frames.sh runs it as whoever owns
+# the directory the captures go to, who may be nobody the image knows: hence
+# a home anyone can make.
 RUN useradd --create-home --uid 1000 capture && mkdir -p /captures && chown capture /captures
 USER capture
-ENV HOME=/home/capture XDG_RUNTIME_DIR=/tmp/runtime WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+ENV HOME=/tmp/home XDG_RUNTIME_DIR=/tmp/runtime WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
 VOLUME /captures
 ENTRYPOINT ["/opt/capture/run.sh"]

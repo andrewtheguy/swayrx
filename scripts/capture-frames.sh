@@ -14,9 +14,10 @@
 # whenever the encoder changes.
 #
 # The container is docker's, or podman's where there is no docker or where
-# `docker` is podman under that name. A rootless podman maps the container's
-# users into a range of its own, so the user the desktop runs as is kept as
-# the one running this, who can then write the captures into `--out`.
+# `docker` is podman under that name. The desktop runs as whoever runs this,
+# so that it can write the captures into `--out`: by their user and group id,
+# except under a rootless podman, which maps the container's users into a
+# range of its own and is told to make the image's user the one running this.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,7 +40,9 @@ command -v docker >/dev/null || engine=podman
 command -v "$engine" >/dev/null || { echo "$0: neither docker nor podman is on the path" >&2; exit 1; }
 run_args=()
 if "$engine" --version | grep -qi podman && [[ "$("$engine" info --format '{{.Host.Security.Rootless}}')" == true ]]; then
-	run_args+=(--userns=keep-id)
+	run_args+=(--userns=keep-id:uid=1000,gid=1000)
+else
+	run_args+=(--user "$(id -u):$(id -g)")
 fi
 
 "$engine" buildx build \

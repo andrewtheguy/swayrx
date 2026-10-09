@@ -403,7 +403,7 @@ fn sample(args: &Args) -> Result<(), Error> {
         if (frame.index as usize) < start {
             continue;
         }
-        if frame.index as usize >= run.end {
+        if frame.index as usize >= start + args.frames {
             break;
         }
         let output = match &mut output {
@@ -411,16 +411,13 @@ fn sample(args: &Args) -> Result<(), Error> {
             None => output.insert(Output::new(&args.dir, frame.size, args.chroma, frame.quality, args.threads)?),
         };
         output.frame(&frame)?;
-        if output.frames as usize == args.frames {
-            break;
-        }
     }
     drop(source);
     let output = output.expect("the run is in the capture");
     if (output.frames as usize) < args.frames {
         let frames = output.frames;
         output.discard();
-        return Err(format!("the encoder made {frames} frames of the {width}x{height} run from frame {start}, short of the {} asked", args.frames).into());
+        return Err(format!("the encoder made {frames} frames of the {} from frame {start} of the {width}x{height} run", args.frames).into());
     }
     let Some(shape) = keyframe_shape(&output.first) else {
         output.discard();

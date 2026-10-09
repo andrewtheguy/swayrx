@@ -42,7 +42,7 @@ QUIET="terminal uncover"
 BUSY="flood browser drag video walk"
 
 export CAPTURE_MATERIAL=/tmp/capture-material
-mkdir -p "$XDG_RUNTIME_DIR" "$RAW"
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$RAW"
 chmod 700 "$XDG_RUNTIME_DIR"
 # What the scenarios type goes through each session's sink, which reads it
 # here (scenarios/lib.sh, `press`); held open both ways, so that neither a
@@ -223,7 +223,8 @@ if [[ ${#captures[@]} -eq 0 ]]; then
 	log "no captures were written"
 	exit 1
 fi
-zstd -T0 -q --rm "${captures[@]}"
+# Over a capture of the same name a run before left.
+zstd -T0 -q -f --rm "${captures[@]}"
 rmdir "$RAW" 2>/dev/null || true
 {
 	echo "# Frame captures"
