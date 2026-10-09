@@ -1418,18 +1418,16 @@ impl Session {
         let sent = Instant::now();
         writer.send(&self.out).await.context("writing an update")?;
         if let Some((keyframe, _)) = vp9 {
-            // Judged by the quality the frame was encoded at, which is what the
-            // client is holding: the ceiling for a settle, whatever the walk holds.
-            let quality = if settling { self.stream.quality } else { self.vp9.as_ref().expect("a VP9 frame was encoded").quality() };
+            // Judged by the coarsest quality any of the picture was last
+            // encoded at, which is what the client is holding: a frame of
+            // damage sharpens the blocks it codes and no others, and a settle
+            // all of them, at the ceiling whatever the walk holds.
+            let quality = self.vp9.as_ref().expect("a VP9 frame was encoded").coarsest();
             if keyframe {
                 // The frames behind it queue behind its crossing, a settle's too.
                 self.walk.keyframe(sent);
             }
-            // A frame of damage leaves the rest of the picture at whatever
-            // quality it was last coded at, so a coarse picture stays owed its
-            // settle until a whole frame sharpens it.
-            let coarse = self.walk.coarse(quality) || (changed.is_some() && self.coarse_since.is_some());
-            self.coarse_since = coarse.then_some(sent);
+            self.coarse_since = self.walk.coarse(quality).then_some(sent);
             self.settle_owed = false;
             self.frame_sent = Some(sent);
         }

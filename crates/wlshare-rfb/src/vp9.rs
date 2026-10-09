@@ -162,40 +162,42 @@ fn decoder_threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
 }
 
-/// One connection's VP9 stream, server side: an encoder at one picture size,
-/// and the planes the framebuffer is converted into in front of it. A
-/// framebuffer of another size needs another encoder, whose first frame is a
-/// keyframe by construction.
+/// One connection's VP9 stream, server side: screen-vp9's stream at one
+/// picture size, which converts the framebuffer and codes it. A framebuffer of
+/// another size needs another encoder, whose first frame is a keyframe by
+/// construction.
 pub struct Vp9Encoder {
-    encoder: screen_vp9::Encoder,
-    picture: screen_vp9::Picture,
-    /// The planes hold a whole picture, which a frame of damage alone is read
-    /// over.
-    whole: bool,
+    stream: screen_vp9::Stream,
 }
 
 impl Vp9Encoder {
     /// An encoder for a `width`×`height` picture at `chroma` and `quality`
     /// (1–100).
     pub fn new(width: u16, height: u16, chroma: Chroma, quality: u8) -> Result<Self, Vp9Error> {
-        let picture = screen_vp9::Picture::new(width, height, chroma)?;
-        let encoder = screen_vp9::Encoder::new(width, height, chroma, quality, encoder_threads())?;
-        Ok(Self { encoder, picture, whole: false })
+        Ok(Self { stream: screen_vp9::Stream::new(width, height, chroma, quality, encoder_threads())? })
     }
 
     /// The chroma this encoder codes.
     pub fn chroma(&self) -> Chroma {
-        self.encoder.chroma()
+        self.stream.chroma()
     }
 
     /// The picture size this encoder codes.
     pub fn size(&self) -> (u16, u16) {
-        self.encoder.size()
+        self.stream.size()
     }
 
     /// The quality the next frame is coded at, clamped to the dial.
     pub fn quality(&self) -> u8 {
-        self.encoder.quality()
+        self.stream.quality()
+    }
+
+    /// The coarsest quality any block of the client's picture was last coded
+    /// at: below the stream's ceiling while a frame the link coarsened has left
+    /// blocks no finer frame has coded since, which a frame of damage does not
+    /// do for the blocks it skips and a whole frame does for all of them.
+    pub fn coarsest(&self) -> u8 {
+        self.stream.coarsest()
     }
 
     /// Move the dial on the running encoder, clamped to it. The next frame is
@@ -203,7 +205,7 @@ impl Vp9Encoder {
     /// encoder would cost a keyframe, the most bytes a frame can be, at the
     /// moment a slow link can least afford them.
     pub fn set_quality(&mut self, quality: u8) -> Result<(), Vp9Error> {
-        Ok(self.encoder.set_quality(quality)?)
+        Ok(self.stream.set_quality(quality)?)
     }
 
     /// Encode the picture — [`Self::size`] of `B, G, R, X` pixels whose rows
@@ -216,29 +218,17 @@ impl Vp9Encoder {
     /// rectangles span are read from `pixels`, whose other rows may hold
     /// anything, and only the blocks they touch are coded: the rest of the
     /// frame is the picture the client already holds, at the quality it holds
-    /// it. A keyframe and an encoder's first frame are the whole picture
-    /// whatever `changed` says, and read all of `pixels`.
+    /// it. A keyframe, an encoder's first frame and the frame after one that
+    /// produced nothing are the whole picture whatever `changed` says, and
+    /// read all of `pixels`.
     ///
     /// Returns whether a body was appended: `false`, with `out` as it was, when
     /// the encoder produced no frame, since an empty rectangle is not a frame a
-    /// client can decode and the pixels are the next frame's to carry — which
-    /// for a frame of damage means its rectangles are, named again.
+    /// client can decode and the pixels are the next frame's to carry.
     pub fn encode_rect(&mut self, pixels: &[u8], stride: usize, changed: Option<&[Rect]>, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
-        let changed = changed.filter(|_| self.whole && !keyframe);
-        match changed {
-            Some(rects) => {
-                for rect in rects {
-                    self.picture.read_bgrx_rows(pixels, stride, rect.y..rect.y.saturating_add(rect.height))?;
-                }
-            }
-            None => {
-                self.picture.read_bgrx(pixels, stride)?;
-                self.whole = true;
-            }
-        }
         let length_at = out.len();
         out.extend_from_slice(&[0; 4]);
-        match self.encoder.encode(&self.picture, keyframe, changed, out) {
+        match self.stream.encode_bgrx(pixels, stride, changed, keyframe, out) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 out.truncate(length_at);
