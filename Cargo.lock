@@ -1142,8 +1142,8 @@ dependencies = [
 
 [[package]]
 name = "screen-vp9"
-version = "0.0.11"
-source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.11#81549521fd832c3c35ce02ad07e2aa2a29abf783"
+version = "0.0.12"
+source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.12#13001f893f15e53a7a638af4516c2472f983d308"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",
