@@ -478,12 +478,18 @@ compressed afterwards; the reader takes either.
 `vp9-sink` (`crates/wlshare-rfb/examples/`), the one client the container
 has, which lists VP9 at a quality with Fence, ContinuousUpdates and
 ExtendedDesktopSize, sets the desktop's size, echoes the fences, throws
-the frames away, and on cue reads late for a while. `run.sh` plays the scenarios — a terminal typed into and
-scrolled, one flooded with random coloured lines, a page scrolled, a window
-dragged and one uncovered, a video in a window, and the video while the sink
-reads late so the fences come back late and the dial goes down, then back
-up, then the video stopped for the settle — at each size, each scenario its own session and
-so its own file. `scripts/capture-vp9.sh` builds and runs it, against a
+the frames away, and on cue reads late for a while. The content is
+`docker/capture/scenarios/`, a script per scenario that plays on any sway
+desktop and can be run by hand on one a daemon is capturing: the quiet
+ones, a terminal typed into and scrolled and a window over a page uncovered;
+the busy ones, a terminal flooded with random coloured lines
+(`busy-lines.sh`, which floods whatever terminal runs it), a page scrolled,
+a window dragged, and a video in a window. `run.sh` plays them at each size
+with a session around each — the first resizes into the size, the video
+asks a keyframe midway, and the walk is the video while the sink reads late
+so the fences come back late and the dial goes down, then back up, then the
+video stopped for the settle — each scenario its own session and so its own
+file. `scripts/capture-vp9.sh` builds and runs it, against a
 local screen-vp9 checkout when the capture format is ahead of the pinned
 tag. The remotex gateway is not instrumented: its Mac in Standard mode and
 its Windows over RDP hand it exact pixels of the same kind of desktop, so a

@@ -10,7 +10,8 @@
 # `--screen-vp9` names a checkout of screen-vp9 to build the daemon against
 # in place of the pinned tag, for a capture format the pinned release does
 # not have yet; without it the tag is built. `--out` defaults to
-# dist/captures. The sizes and scenarios default to run.sh's.
+# dist/captures. `--scenarios` takes names from docker/capture/scenarios/
+# or the groups `quiet`, `busy` and `all`; the sizes default to run.sh's.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
