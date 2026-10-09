@@ -56,6 +56,13 @@ struct Args {
     /// Listen on this address instead of the configured one.
     #[arg(long)]
     listen: Option<std::net::SocketAddr>,
+    /// Write what every VP9 stream is handed into this directory, exact: each
+    /// session's frames as a capture file (`wlshare_rfb::capture`), one
+    /// `<unix millis>-client<id>.wlcap` per session, for an encoder to be
+    /// run again on. Uncompressed and large: run `zstd` on them afterwards.
+    /// For a daemon run by hand: a systemd unit that names it is refused.
+    #[arg(long, value_name = "DIR")]
+    capture_frames: Option<PathBuf>,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -93,6 +100,11 @@ fn main() -> anyhow::Result<()> {
     if let Some(listen) = args.listen {
         config.listen = listen;
     }
+    if let Some(dir) = &args.capture_frames {
+        refuse_capture_as_a_service()?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        info!("capturing what every VP9 stream is handed into {}", dir.display());
+    }
     let security = security(&config, &path)?;
 
     // The compositor thread comes up first and hands back what it learned about
@@ -100,11 +112,30 @@ fn main() -> anyhow::Result<()> {
     let (compositor, shared) = compositor::start(&config)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let result = runtime.block_on(serve(config, security, shared.clone(), compositor));
+    let result = runtime.block_on(serve(config, args.capture_frames, security, shared.clone(), compositor));
     if let Err(e) = &result {
         error!("{e:#}");
     }
     result
+}
+
+/// A capture is a run somebody started by hand and will stop: it writes every
+/// frame of every session to disk, tens of megabytes apiece, and removes
+/// nothing. So the flag is on the command line alone, with no key in the
+/// configuration, and a command line systemd runs is not one somebody typed:
+/// a unit that has been given the flag would fill a disk at every login. A
+/// service manager says which process it started in `SYSTEMD_EXEC_PID`, so a
+/// daemon run from a terminal inside a session systemd started is not taken
+/// for one.
+fn refuse_capture_as_a_service() -> anyhow::Result<()> {
+    let started_by_systemd = std::env::var("SYSTEMD_EXEC_PID").is_ok_and(|pid| is_this_process(&pid, std::process::id()));
+    anyhow::ensure!(!started_by_systemd, "--capture-frames is for a daemon run by hand, and this one was started by systemd: take it out of the unit");
+    Ok(())
+}
+
+/// Whether `pid`, as an environment has it, names the process `own`.
+fn is_this_process(pid: &str, own: u32) -> bool {
+    pid.parse() == Ok(own)
 }
 
 /// `wlshare watch`: follow the state socket the configuration names until
@@ -258,6 +289,7 @@ fn write_private(path: &std::path::Path, contents: &[u8]) -> anyhow::Result<()> 
 
 async fn serve(
     config: config::Config,
+    capture_frames: Option<PathBuf>,
     security: Security,
     shared: Arc<shared::Shared>,
     mut compositor: compositor::Handle,
@@ -290,6 +322,7 @@ async fn serve(
         handshake_timeout: std::time::Duration::from_secs(config.handshake_timeout_secs),
         output: config.output.clone(),
         output_wait: std::time::Duration::from_secs(config.output_wait_secs),
+        capture_frames,
     });
     loop {
         tokio::select! {
@@ -325,5 +358,20 @@ async fn serve(
                 break Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the process systemd itself started is a service's: a shell under
+    /// it inherits the variable and has another id.
+    #[test]
+    fn a_capture_is_refused_only_to_the_process_systemd_started() {
+        assert!(is_this_process("4242", 4242));
+        assert!(!is_this_process("4242", 4243));
+        assert!(!is_this_process("", 4242));
+        assert!(!is_this_process("systemd", 4242));
     }
 }

@@ -69,8 +69,12 @@
 
 pub mod audio;
 pub mod camera;
-#[cfg(test)]
-mod client;
+// Not the wire: the file a daemon run by hand writes of what its VP9 encoder
+// was handed, and the tools that play it back read.
+pub mod capture;
+// Public for `examples/vp9-sink.rs`, the client the capture container runs
+// against the daemon; the tests read the server's bytes with it.
+pub mod client;
 pub mod clipboard;
 pub mod cursor;
 pub mod density;

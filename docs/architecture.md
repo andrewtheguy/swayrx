@@ -457,6 +457,84 @@ listed, Raw otherwise — since the client is holding a lossy picture.
 
 libvpx comes from `libvpx-prebuilt`'s static archive, through screen-vp9.
 
+### Capturing what the encoder is handed
+
+A daemon started with `--capture-frames DIR` writes, for every session, what
+its VP9 encoder is handed, exact: each frame's time, its size, the dial at
+the time, whether a keyframe was asked, the damage rectangles or that there
+were none, and the rows the rectangles span as the framebuffer holds them,
+`B, G, R, X`. The file is the capture file of `wlshare-rfb`'s `capture`
+module, whose layout is written out there: this repository's own, read and
+written here, and owing nothing to the codec, since a capture is the pixels
+in front of an encoder whichever encoder that is. There is one
+`<unix millis>-client<id>.wlcap` per session, written at the one call that
+hands the encoder its pixels and so spanning every encoder the session makes
+across resizes. Nothing on the way is lossy, which is the point: an encoder
+is run again on the pictures a desktop is actually shown as and the
+rectangles they came with, not on a decode of a stream. The files are
+uncompressed and large — a 4K whole frame is 33 MB — and are `zstd`
+compressed afterwards.
+
+The flag is on the command line alone, with no key in the configuration, and
+on purpose: a capture writes every frame of every session to disk and removes
+nothing, so it is on only where somebody typed it, for a run they started by
+hand and will stop. The packaged unit does not name it, and a unit that has
+been given it is refused at start: systemd says which process it started in
+`SYSTEMD_EXEC_PID`, and a daemon that finds its own id there with the flag
+set does not run. A daemon started from a terminal inside a session systemd
+started has another id and is not taken for one.
+
+`docker/capture/` runs that without a person: a headless sway on wlroots
+0.19, the daemon started by the container's script with the flag and no
+authentication on loopback, and `vp9-sink` (`crates/wlshare-rfb/examples/`),
+the one client the container has, which lists VP9 at a quality with Fence,
+ContinuousUpdates and ExtendedDesktopSize, sets the desktop's size, echoes
+the fences, throws the frames away, on cue reads late for a while, and
+types what the scenarios have it type, so the keys reach the desktop through
+the daemon as a person's do. The
+content is `docker/capture/scenarios/`, a script per scenario that plays on
+any sway desktop and can be run by hand on one a daemon is capturing: the
+quiet ones, a terminal typed into and scrolled and a window over a page
+uncovered; the busy ones, a terminal flooded with random coloured lines
+(`flood.sh`, and `busy-lines.sh`, which floods whatever terminal runs it), a
+page scrolled,
+a window dragged, and a video in a window. `run.sh` plays them at each size
+with a session around each — the first resizes into the size, the video
+asks a keyframe midway, and the walk is the video while the sink reads late
+so the fences come back late and the dial goes down, then back up, then the
+video stopped for the settle — each scenario its own session and so its own
+file. The flood's session runs on past its length until it has a hundred and
+fifty frames: every frame of it is the whole picture new, the slowest there
+is to code, and a large desktop gets a few of them a second. A scenario that
+fails, or whose sink does, leaves no capture and fails the run, so a file
+named for a scenario is never something else. `scripts/capture-frames.sh` builds and runs it, against the encoder the
+workspace pins and nothing else. The remotex gateway is not instrumented for
+this: its Mac in Standard mode and its Windows over RDP hand it exact pixels
+of the same kind of desktop, so a wlshare capture at their sizes stands for
+them.
+
+The captures are the source, and the streams a decoder is tested and timed
+on are made of them: `vp9cap` (`crates/wlshare-rfb/examples/`) plays a
+capture into the encoder again, each frame with its rectangles, at the dial
+it was coded at, a keyframe where one was asked. So a walk's steps and its
+settle are in the stream it makes without a slow link being played again,
+and a change to how a desktop is coded — a pin bump of screen-vp9 — is a run
+of `scripts/vp9-samples.sh` over the captures already kept, not a desktop
+played again. The script writes what vp9-wasm's benchmark reads: for each
+size a quiet and a busy sample of 120 frames, the start of the terminal's
+capture and the frames in a row of the flood's that said the most pixels
+changed, each starting with a keyframe of the picture as it stood and named
+`<quiet|busy>-<WxH>-<tile columns>col-<lf|nolf>` from what the stream's own
+keyframe header says, not from the encoder's rule. With `--streams` it also
+codes every capture whole, one stream per size the capture ran at, as IVF
+beside a CSV of each frame's time, bytes, keyframe and dial — the file pair
+the remotex gateway's own `--vp9-capture` writes of the streams it encodes.
+Every stream gets the MD5 of each frame libvpx decodes of it, from ffmpeg,
+and is kept only where ffmpeg's own VP9 decoder, which shares no code with
+libvpx, makes the same pictures. The encoder there is given four threads
+whatever the machine, since the tile columns a width is coded in are capped
+by the threads and a sample must be the same stream wherever it is made.
+
 ### The client's paint
 
 The walk above is only as honest as the fence it times, and a fence echoed the
