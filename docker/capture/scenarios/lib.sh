@@ -23,12 +23,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '%s %s\n' "$(date +%T)" "$*" >&2; }
 
-# The desktop's size in pixels, from the focused output.
+# The desktop's size as sway lays it out, from the output's rectangle: the
+# units windows are placed and the pointer moved in, which at scale 2 are
+# half the mode's pixels.
 desktop_size() {
-	local mode
-	mode=$(swaymsg -t get_outputs | tr -d ' \n' | sed -n 's/.*"current_mode":{"width":\([0-9]*\),"height":\([0-9]*\).*/\1 \2/p' | head -n 1)
-	W=${mode% *}
-	H=${mode#* }
+	local rect
+	rect=$(swaymsg -t get_outputs | tr -d ' \n' | sed -n 's/.*"rect":{"x":-\{0,1\}[0-9]*,"y":-\{0,1\}[0-9]*,"width":\([0-9]*\),"height":\([0-9]*\).*/\1 \2/p')
+	W=${rect% *}
+	H=${rect#* }
 	[[ -n "$W" && -n "$H" ]] || { log "no output size from swaymsg"; exit 1; }
 }
 

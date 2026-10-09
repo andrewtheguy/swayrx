@@ -143,7 +143,10 @@ if [[ -n "$streams" ]]; then
 	for capture in "${all_captures[@]}"; do
 		scenario="$(basename "$capture" .wlcap.zst)"
 		scenario="${scenario%%-*}"
+		# Before any of them is read, so that a capture it failed on stops the run.
+		made="$("$vp9cap" streams "$capture" --dir "$streams" --name "$scenario" --least 30 --threads "$threads")"
 		while read -r ivf; do
+			[[ -n "$ivf" ]] || continue
 			framemd5 "$ivf"
 			count=$(($(wc -l <"$ivf.csv") - 1))
 			keyframes=$(awk -F, 'NR > 1 && $4 == 1' "$ivf.csv" | wc -l)
@@ -151,7 +154,7 @@ if [[ -n "$streams" ]]; then
 			seconds="$(awk -F, 'END { printf "%.1f", $2 / 1000 }' "$ivf.csv")"
 			rows+="| \`$(basename "$ivf" .ivf)\` | \`$(basename "$capture")\` | $("$vp9cap" shape "$ivf") | $count | $keyframes | $dial | $seconds | $(du -h "$ivf" | cut -f1) |"$'\n'
 			log "$(basename "$ivf" .ivf)"
-		done < <("$vp9cap" streams "$capture" --dir "$streams" --name "$scenario" --least 30 --threads "$threads")
+		done <<<"$made"
 	done
 	{
 		echo "# VP9 streams"
