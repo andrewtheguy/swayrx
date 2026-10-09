@@ -25,11 +25,18 @@
 #                    down and back up, then stopped, so the desktop settles
 set -euo pipefail
 
-# The sizes are vp9-wasm's: the nine its benchmark has a quiet and a busy
-# sample of, whose names (`bench/run.sh` there) are what
-# scripts/vp9-samples.sh makes of these. The five from 2048 wide are drawn at
-# scale 2, as the desktops those sizes were first captured from were.
-SIZES="${SIZES:-1280x800 1440x900 1600x1000 1920x1080 2048x1536@2 2560x1600@2 2880x1800@2 3456x2168@2 3840x2160@2}"
+# The sizes are four desktops at scale 1 and five at scale 2, the four again
+# and a 1024x768 one. Eight are vp9-wasm's, sizes its benchmark has a quiet
+# and a busy sample of under the names (`bench/run.sh` there) that
+# scripts/vp9-samples.sh makes of these; 3200x2000 is here in place of its
+# 3456x2168, so that each of the four is captured at both scales. A size is in
+# pixels, so a desktop at scale 2 is half of it in points:
+#   2048x1536@2   1024x768 points
+#   2560x1600@2   1280x800 points
+#   2880x1800@2   1440x900 points
+#   3200x2000@2   1600x1000 points
+#   3840x2160@2   1920x1080 points
+SIZES="${SIZES:-1280x800 1440x900 1600x1000 1920x1080 2048x1536@2 2560x1600@2 2880x1800@2 3200x2000@2 3840x2160@2}"
 SCENARIOS="${SCENARIOS:-all}"
 QUALITY="${QUALITY:-90}"
 LENGTH="${LENGTH:-20}"
