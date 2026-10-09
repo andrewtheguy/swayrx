@@ -1342,11 +1342,14 @@ impl Session {
                 // A VP9 frame is the whole picture, of which the encoder reads
                 // the rows that changed: those are copied to their own place,
                 // and the rest of `scratch` is whatever an earlier frame left.
+                // Copied out to whole pairs of rows, an even one and the odd
+                // one under it, which a 4:2:0 stream reads together.
                 let row_len = usize::from(fb.width) * 4;
                 self.scratch.resize(row_len * usize::from(fb.height), 0);
                 let whole = [Rect::whole(fb.width, fb.height)];
                 for rect in damage.as_deref().unwrap_or(&whole) {
-                    for row in usize::from(rect.y)..usize::from(rect.y) + usize::from(rect.height) {
+                    let bottom = (usize::from(rect.y) + usize::from(rect.height)).next_multiple_of(2).min(usize::from(fb.height));
+                    for row in usize::from(rect.y) & !1..bottom {
                         self.scratch[row * row_len..][..row_len].copy_from_slice(&fb.pixels[row * stride..][..row_len]);
                     }
                 }

@@ -215,8 +215,11 @@ impl Vp9Encoder {
     ///
     /// `changed` is the damage since the picture encoded before, or `None`
     /// for a picture that may differ anywhere. With it only the rows the
-    /// rectangles span are read from `pixels`, whose other rows may hold
-    /// anything, and only the blocks they touch are coded: the rest of the
+    /// rectangles span are read from `pixels`, and at 4:2:0 the row that
+    /// shares a chroma row with one of them — an even row and the odd one
+    /// under it are read together — so that row must hold the picture too.
+    /// The other rows may hold anything. Only the blocks the rectangles touch
+    /// are coded: the rest of the
     /// frame is the picture the client already holds, at the quality it holds
     /// it. A keyframe, an encoder's first frame and the frame after one that
     /// produced nothing are the whole picture whatever `changed` says, and
