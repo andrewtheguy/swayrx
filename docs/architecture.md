@@ -12,17 +12,16 @@ wlroots compositor ── Wayland socket ──▶ compositor thread ──▶ F
                      data-control
 ```
 
-- [screen-vp9](https://github.com/andrewtheguy/screen-vp9), a repository of
-  its own that this workspace and the remotex gateway each pin by release tag,
-  is the one place libvpx is spoken to: the encoder configuration a desktop is
-  coded with, the planes in front of it at either chroma, the decoder, what a
-  frame says about itself, and the quality walk. It has no platform dependency,
-  and a change to how a desktop is coded is made there once for the daemon and
-  the gateway, and reaches each as a pin bump. See
+- [screen-vp9-native](https://github.com/andrewtheguy/screen-vp9-native), a
+  repository of its own that this workspace pins by release tag, is the VP9
+  encoder: written in Rust for a desktop, 8-bit 4:4:4 and nothing else, with
+  the planes in front of it, what a frame says about itself, and the quality
+  walk. It links no libvpx, and a change to how a desktop is coded is made
+  there and reaches the daemon as a pin bump. See
   [The VP9 encoding](#the-vp9-encoding).
 - `crates/wlshare-rfb` decides every byte on the wire: handshake, message parsing
   and building, RSA-AES and its frames, the ZRLE encoder, the VP9 encoding's
-  framing over `screen-vp9`, the cursor and clipboard encodings, and the
+  framing over `screen-vp9-native`, the cursor and clipboard encodings, and the
   density, outputs, audio, camera and microphone extensions and the scroll
   message. It has no platform
   dependency — the audio extension's FLAC encoder, libFLAC under `sound-flac`,
@@ -311,8 +310,8 @@ desktop as one VP9 stream, for a client that
 would rather have a picture that moves than one that is exact. While the
 framebuffer is within its video ceiling, remotex lists it for every browser on a
 target with `subtype = "wlshare"` and passes each frame to the browser as it came, since it is the stream remotex would
-otherwise encode from ZRLE's pixels — at the chroma the browser's decoder takes
-and the target's own dial, which it names beside the encoding, below. A client
+otherwise encode from ZRLE's pixels — at the target's own dial, which it
+names beside the encoding, below. A client
 that does not list it is unchanged.
 
 A client that lists it, with a quality beside it (below), gets it instead of a
@@ -327,20 +326,19 @@ u8[length]   one VP9 frame
 
 Successive rectangles are one stream, each frame coded against the ones before
 it, so a client decodes them all with one decoder, in order. The coding is
-screen-vp9's, which remotex encodes its own streams with as well, so
-the two sides agree on every libvpx setting by construction: the quantizer
-pinned to the dial, screen-content tuning, no lag, no dropped frames, no
-keyframe that was not asked for, and the colour declared in the bitstream.
+screen-vp9-native's, an encoder written for a desktop: the quantizer
+pinned to the dial, no lag, no dropped frames, no keyframe that was not
+asked for, and the colour declared in the bitstream.
 `crates/wlshare-rfb/src/vp9.rs` is the framing over it — the length word and
-its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
+its ceiling, and the framebuffer's pixels in. What a frame holds is fixed:
 
-- **8-bit 4:4:4, VP9 profile 1, unless the client asks for 4:2:0.** A colour
+- **8-bit 4:4:4, VP9 profile 1, and nothing else.** A colour
   sample per pixel: the loss 4:2:0 costs a desktop is its text's colour — a
   one-pixel coloured stem shares its sample with three pixels of background —
-  and no quantizer puts it back. The gateway asks for 4:2:0 (profile 0) for a
-  browser whose decoder takes nothing else, since a stream that browser refuses
-  by name carries no colour at all, by listing `WLS0` beside the encoding
-  (below).
+  and no quantizer puts it back. There is no 4:2:0 stream: a browser whose
+  decoder takes only profile 0 refuses this one by name, and `WLS0`
+  (`0x574c5330`), which once asked for 4:2:0, is an encoding the server does
+  not know.
 - **BT.601 at studio swing**, converted from the framebuffer's `B, G, R, X` and
   declared in the keyframe header, so a decoder converts back with the same
   matrix. The client's pixel format does not apply.
@@ -349,8 +347,8 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   to wherever the dial is, with no bitrate, no adaptive quantization and no
   dropped frames. A session starts at the ceiling the client's list names
   (`WLQ`, below), which it never goes above, and
-  walks down to a floor of 20 while the client is behind — the one walk both
-  run, screen-vp9's `walk`. The floor is a constant, not a key, as
+  walks down to a floor of 20 while the client is behind — screen-vp9-native's
+  `walk`. The floor is a constant, not a key, as
   every adaptive stream's is: where WebRTC's quality scaler hands off from the
   quantizer to resolution and frame rate at its own threshold, this walk hands
   off to the frame rate, and the settle below sharpens a quiet desktop back at
@@ -385,32 +383,33 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   message, because a server that is not wlshare ignores an encoding it does
   not know where a message it does not know ends the connection, and because
   they ride the list that names the encoding, so the first frame is already
-  what was asked for. `WLS0` (`0x574c5330`) asks for 4:2:0 in place of 4:4:4;
+  what was asked for.
   `0x574c5100` plus a quality 1–100 (`WLQ` and the value) names the ceiling the
   walk never goes above; `WLSD` (`0x574c5344`)
   holds the dial there, with a walk that hears nothing in a fence — only a
   frame whose write blocked moves it, fence or no fence — and a settle with
   nothing to sharpen. The gateway lists them from the target's keys, so
-  `render_chroma`, `video_quality` and `render_adaptive` mean on a passed
+  `video_quality` and `render_adaptive` mean on a passed
   stream what they mean on one the gateway codes. Read at every
-  `SetEncodings`, and owed a frame whether or not the desktop changed: a new
-  chroma starts the stream over at a keyframe, a new ceiling moves the running
-  encoder's dial and sends the picture once at it, as a settle does, and a new
+  `SetEncodings`: a new ceiling moves the running
+  encoder's dial and sends the picture once at it, whether or not the desktop
+  changed, as a settle does, and a new
   walk moves the dial alone. A list that names VP9 without a quality is
   fatal, as a malformed message is: wlshare has no quality of its own, the
   gateway names one beside the encoding on every list, and a client that is
   not the gateway — a plain `vnc` target reads wlshare through the RFB
-  baseline — lists no VP9 at all. Without `WLS0` the stream is 4:4:4, and
-  without `WLSD` it walks.
-  Screen-content tuning, libvpx's
-  realtime speed 7, no lag, and threads with row and tile parallelism: the
+  baseline — lists no VP9 at all. Without `WLSD` it walks.
+  No lag, and threads with row and tile parallelism: the
   machine's cores less two, at most eight, for the encoder, since an encode
-  is a burst the person at the other end waits on, and libvpx clamps the tile
-  columns to what the width allows; half the machine, at most four, for the
-  decoder, which gains nothing past the stream's tiles. The conversion
-  between the framebuffer's pixels and the planes is the `yuv` crate's, on
-  the AVX2 or NEON path the machine has: a scalar loop over a 4K frame was a
-  fifth of an encode and a third of a decode.
+  is a burst the person at the other end waits on. The stream's shape follows
+  the picture's width and those threads, for the decoder's sake: one tile
+  column under 1440 wide, two from 1440, four from 2048, never more than the
+  threads, and a stream in four columns or more is coded without the loop
+  filter. The conversion
+  from the framebuffer's pixels to the planes is the `yuv` crate's, and the
+  encoder's kernels are AVX2 on amd64 and NEON on arm64: an amd64 build sets
+  `-C target-feature=+avx2` (`.cargo/config.toml`), so the daemon needs a
+  processor with AVX2 there, and is refused by the compiler without the flag.
 - **A quiet desktop is sharpened at the ceiling, and the walk keeps its
   place.** The walk only runs when a frame goes out. Ordinarily a frame only
   goes out when something changed, so a desktop that stops right after the link
@@ -419,10 +418,10 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   without Fence its write finished — and nothing has been sent for 500 ms
   since, the unchanged picture goes out again, at the next update the client
   asks for, as one inter frame at the ceiling, coded whole and not by its
-  damage: libvpx codes the residual of unchanged blocks at the finer
-  quantizer, so it sharpens the whole desktop without a keyframe
-  (`a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe`
-  guards that). The encoder is retuned for that one frame and returned to the
+  damage: the residual of the blocks the client holds coarse is coded at the
+  finer quantizer, and a block it holds exactly already is left as it is, so
+  it sharpens the whole desktop without a keyframe
+  (`a_settle_sharpens_the_picture_and_leaves_the_dial` guards that). The encoder is retuned for that one frame and returned to the
   walk's quality after it, and the frame is no verdict: the screen stopping
   says nothing about the link, and a walk that started every burst of motion
   from the ceiling was measured to put the picture half a second behind at
@@ -432,25 +431,23 @@ its ceiling, the framebuffer's pixels in and out. What a frame holds is fixed:
   whole frame that went out at the ceiling owes nothing, and a desktop that
   goes quiet after one sends nothing; a frame of damage at the ceiling
   sharpens only the blocks it codes, so a picture coarsened before it is
-  still owed its settle. remotex's settle for its own whole-desktop
-  streams.
+  still owed its settle.
 - **Keyframes only when a decoder needs one**: the first frame after the
-  encoding is listed, the first at a new size or chroma (the encoder is made
+  encoding is listed, the first at a new size (the encoder is made
   again for it), and the frame that answers a non-incremental request. There is
   no periodic keyframe; nothing is lost on TCP.
 
 A normal VP9 update is sent when anything is damaged; a non-incremental request,
-a chroma or quality-ceiling change and the settle described above can also owe
+a quality-ceiling change and the settle described above can also owe
 one. The frame is the whole picture, and what did not change costs it
 nearly nothing, in bytes or in time: the session hands the encoder the damage
 since the client's last frame, the encoder converts the rectangles of the damage
-and codes the blocks they touch, and every other block is skipped as the client
-holds it — libvpx's active map, a byte per 16×16 block. The conversion is
+and codes the 8×8 blocks they touch, and every other block is left as the client
+holds it, in a segment a decoder reads nothing more of. The conversion is
 straight out of the framebuffer, under its lock, into the encoder's planes, and
 the frame is coded from those once the lock is let go: the pixels are copied
-nowhere between, unless the frames are captured. A 4K frame with one
-small change took 26 ms to encode whole and 6 to convert, and takes 11 and
-nothing told where it changed; a 1440p one 12 and 2, and takes 5. A keyframe,
+nowhere between, unless the frames are captured. What the encoder was
+measured at is in its own repository (`docs/benchmarks.md`). A keyframe,
 an encoder's first frame, a settle and a client the damage log no longer
 reaches back for are coded whole. The encode runs on the session's worker,
 which is told it is blocking, and the fence keeps one frame in flight as it does
@@ -458,7 +455,9 @@ a standard pixel update. A `SetEncodings` that drops the encoding is answered
 with the whole framebuffer in the standard encoding it selected — ZRLE when
 listed, Raw otherwise — since the client is holding a lossy picture.
 
-libvpx comes from `libvpx-prebuilt`'s static archive, through screen-vp9.
+Nothing of libvpx is in the daemon. It is a dev-dependency of `wlshare-rfb`,
+from `libvpx-prebuilt`'s static archive: the decoder the VP9 encoding's tests
+read every frame back with (`src/vp9_decoder.rs`).
 
 ### Capturing what the encoder is handed
 
@@ -521,7 +520,7 @@ on are made of them: `vp9cap` (`crates/wlshare-rfb/examples/`) plays a
 capture into the encoder again, each frame with its rectangles, at the dial
 it was coded at, a keyframe where one was asked. So a walk's steps and its
 settle are in the stream it makes without a slow link being played again,
-and a change to how a desktop is coded — a pin bump of screen-vp9 — is a run
+and a change to how a desktop is coded — a pin bump of screen-vp9-native — is a run
 of `scripts/vp9-samples.sh` over the captures already kept, not a desktop
 played again. The script writes what vp9-wasm's benchmark reads: for each
 size a quiet and a busy sample of 120 frames, the start of the terminal's
@@ -864,7 +863,7 @@ which this workspace and the gateway, for the sound it codes itself, each pin
 by release tag, so a packet made here and one made there are the same stream —
 music-tuned, constrained variable rate around the bitrate, at full effort, with
 silence a few bytes a packet. libopus is linked from a prebuilt static archive
-its sys crate downloads, as libvpx is under `screen-vp9`: no C is compiled,
+its sys crate downloads: no C is compiled,
 nothing is loaded at run time and the package depends on nothing for it.
 `wlshare-rfb`'s tests wrap the packets in an Ogg stream behind the header a
 client builds and decode them with FFmpeg's own Opus decoder, which shares

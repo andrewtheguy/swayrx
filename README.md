@@ -184,10 +184,12 @@ read their packets back with — and
 `wlshare`, the daemon, which needs libwayland,
 libxkbcommon, libpipewire and libavcodec and only runs under a wlroots-based
 Wayland compositor. The VP9 coding under them is
-[screen-vp9](https://github.com/andrewtheguy/screen-vp9), the FLAC coding
+[screen-vp9-native](https://github.com/andrewtheguy/screen-vp9-native), an
+encoder in Rust whose amd64 build needs AVX2 (`.cargo/config.toml` sets it),
+the FLAC coding
 [sound-flac](https://github.com/andrewtheguy/sound-flac) and the Opus coding
-[sound-opus](https://github.com/andrewtheguy/sound-opus), each shared with
-the remotex gateway and pinned by its release tag. A bare `cargo test` covers the
+[sound-opus](https://github.com/andrewtheguy/sound-opus), the last two shared with
+the remotex gateway, each pinned by its release tag. A bare `cargo test` covers the
 first; build the daemon with
 `cargo build --release -p wlshare` on a Linux host with `libwayland-dev`,
 `libxkbcommon-dev`, `libpam0g-dev`, `libpipewire-0.3-dev`, `libspa-0.2-dev`,
@@ -202,7 +204,7 @@ VP9 encoder was handed — every frame's pixels and damage, exact — lands in
 `dist/captures/`. `scripts/vp9-samples.sh` plays those captures into the
 encoder again and writes the streams vp9-wasm's benchmark decodes, a quiet
 and a busy one of each size with every frame's MD5, into `dist/vp9-bench/`:
-run it again after a screen-vp9 pin bump and the samples are the new
+run it again after a screen-vp9-native pin bump and the samples are the new
 encoder's, with no desktop played again. It needs `zstd` and an `ffmpeg`
 with libvpx on the path. `--capture-frames` is for a daemon run by hand, and one
 systemd started refuses it (`docs/architecture.md`, "Capturing what the

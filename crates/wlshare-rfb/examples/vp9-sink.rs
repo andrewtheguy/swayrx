@@ -216,7 +216,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                             RectBody::Vp9(frame) => {
                                 frames += 1;
                                 bytes += frame.len() as u64;
-                                if screen_vp9::frame_header(&frame).is_some_and(|h| h.keyframe) {
+                                if screen_vp9_native::frame_header(&frame).is_some_and(|h| h.keyframe) {
                                     keyframes += 1;
                                 }
                             }

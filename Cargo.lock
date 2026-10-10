@@ -1141,12 +1141,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "screen-vp9"
-version = "0.0.14"
-source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.14#7387679172365cc908f72c5e7d86e2203b2289cf"
+name = "screen-vp9-native"
+version = "0.0.1-alpha.1"
+source = "git+https://github.com/andrewtheguy/screen-vp9-native?tag=v0.0.1-alpha.1#9ab5552d29aab5464e713c8c1eda30ce1bd95b7c"
 dependencies = [
- "libvpx-prebuilt-sys",
- "log",
  "thiserror",
  "yuv",
 ]
@@ -1659,7 +1657,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "wlshare"
-version = "0.0.62"
+version = "0.0.63-alpha.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1673,7 +1671,7 @@ dependencies = [
  "memmap2",
  "pipewire",
  "rustix",
- "screen-vp9",
+ "screen-vp9-native",
  "serde",
  "thiserror",
  "tokio",
@@ -1688,15 +1686,16 @@ dependencies = [
 
 [[package]]
 name = "wlshare-rfb"
-version = "0.0.62"
+version = "0.0.63-alpha.1"
 dependencies = [
  "aes",
  "eax",
  "flate2",
+ "libvpx-prebuilt-sys",
  "pkcs8",
  "rand",
  "rsa",
- "screen-vp9",
+ "screen-vp9-native",
  "sha1",
  "sha2",
  "sound-flac",
@@ -1706,6 +1705,7 @@ dependencies = [
  "symphonia-core",
  "thiserror",
  "tokio",
+ "yuv",
 ]
 
 [[package]]

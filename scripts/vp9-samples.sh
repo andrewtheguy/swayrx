@@ -2,7 +2,7 @@
 # Make the VP9 streams a decoder is tested and timed on from the captures
 # scripts/capture-frames.sh left: each capture played into the encoder as it is
 # pinned now (crates/wlshare-rfb/examples/vp9cap.rs), so that a change to how
-# a desktop is coded — a pin bump of screen-vp9 — is one run of this and no
+# a desktop is coded — a pin bump of screen-vp9-native — is one run of this and no
 # desktop has to be played again.
 #
 #   ./scripts/vp9-samples.sh [--captures DIR] [--out DIR] [--streams DIR] [--clean]
@@ -67,7 +67,7 @@ shopt -u nullglob
 
 cargo build --release --manifest-path "${here}/Cargo.toml" -p wlshare-rfb --example vp9cap
 vp9cap="${here}/target/release/examples/vp9cap"
-coded_by="$(cargo metadata --manifest-path "${here}/Cargo.toml" --format-version 1 --locked | tr '{' '\n' | sed -n 's/.*"name":"screen-vp9","version":"\([^"]*\)".*/screen-vp9 \1/p' | head -n 1)"
+coded_by="$(cargo metadata --manifest-path "${here}/Cargo.toml" --format-version 1 --locked | tr '{' '\n' | sed -n 's/.*"name":"screen-vp9-native","version":"\([^"]*\)".*/screen-vp9-native \1/p' | head -n 1)"
 
 # The MD5 of every frame of the streams named, as libvpx decodes them, and
 # the same from ffmpeg's own decoder, which shares no code with it.

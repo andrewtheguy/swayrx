@@ -25,7 +25,8 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-too
 WORKDIR /build
 COPY . /build
 
-# The package version is the crate's, as cargo-deb writes it (<version>-1); the
+# The package version is the crate's, as cargo-deb writes it (<version>-1, a
+# prerelease's hyphen a tilde, so that 0.0.63~alpha.1 sorts before 0.0.63); the
 # distribution the package was built for is in the file name only, so the
 # release asset is wlshare-trixie-<arch>.deb whatever the version.
 RUN set -eux; \
@@ -35,7 +36,7 @@ RUN set -eux; \
     [ "$(target/release/wlshare --version)" = "wlshare ${version}" ]; \
     mkdir -p /out; \
     cargo deb -p wlshare --no-build -o "/out/wlshare-trixie-${arch}.deb"; \
-    [ "$(dpkg-deb --field "/out/wlshare-trixie-${arch}.deb" Version)" = "${version}-1" ]; \
+    [ "$(dpkg-deb --field "/out/wlshare-trixie-${arch}.deb" Version)" = "${version/-/\~}-1" ]; \
     cd /out && sha256sum ./*.deb | sed 's#  \./#  #' > SHA256SUMS && cat SHA256SUMS
 
 FROM scratch

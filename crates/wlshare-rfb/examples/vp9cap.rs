@@ -7,9 +7,8 @@
 //! vp9cap info CAPTURE
 //! vp9cap shape STREAM.ivf
 //! vp9cap streams CAPTURE --dir DIR --name NAME [--least N] [--threads N]
-//!        [--chroma 444|420]
 //! vp9cap sample CAPTURE --dir DIR --name NAME --frames N [--busiest]
-//!        [--threads N] [--chroma 444|420]
+//!        [--threads N]
 //! ```
 //!
 //! A capture ending in `.zst` is read through `zstd -dc`, which must then be
@@ -24,8 +23,8 @@
 //!
 //! `streams` codes every frame as the session did — its rectangles, its dial,
 //! its keyframe where one was asked — into one stream per run of a size,
-//! `DIR/NAME-WxH-CHROMA.ivf`, with `-2`, `-3` for a size the capture comes
-//! back to. A run the encoder made fewer than `--least` frames of is left
+//! `DIR/NAME-WxH-444.ivf`, 4:4:4 being the one chroma there is, with `-2`,
+//! `-3` for a size the capture comes back to. A run of fewer than `--least` frames is left
 //! out: the second or two a session spent at another size before it was
 //! resized into its own is in a capture for an encoder's sake, and is no
 //! stream to test a decoder on. Beside each is `.ivf.csv`, `frame,ms,bytes,keyframe,quality`: the
@@ -47,14 +46,14 @@
 //!
 //! `--threads` is the encoder's, 4 by default: the tile columns a width is
 //! coded in are capped by them, so a sample is the same stream on any
-//! machine only at the same count. `--chroma` is 444 by default.
+//! machine only at the same count.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use screen_vp9::{Chroma, Stream};
+use screen_vp9_native::Stream;
 use wlshare_rfb::capture::{Frame, Reader};
 
 type Error = Box<dyn std::error::Error>;
@@ -67,19 +66,18 @@ struct Args {
     least: u32,
     busiest: bool,
     threads: usize,
-    chroma: Chroma,
 }
 
 const USAGE: &str = "usage: vp9cap info CAPTURE
        vp9cap shape STREAM.ivf
-       vp9cap streams CAPTURE --dir DIR --name NAME [--least N] [--threads N] [--chroma 444|420]
-       vp9cap sample CAPTURE --dir DIR --name NAME --frames N [--busiest] [--threads N] [--chroma 444|420]";
+       vp9cap streams CAPTURE --dir DIR --name NAME [--least N] [--threads N]
+       vp9cap sample CAPTURE --dir DIR --name NAME --frames N [--busiest] [--threads N]";
 
 fn parse_args() -> Result<(String, Args), String> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or("a command")?;
     let capture = PathBuf::from(args.next().ok_or("a capture to read")?);
-    let mut parsed = Args { capture, dir: PathBuf::new(), name: String::new(), frames: 0, least: 1, busiest: false, threads: 4, chroma: Chroma::Full };
+    let mut parsed = Args { capture, dir: PathBuf::new(), name: String::new(), frames: 0, least: 1, busiest: false, threads: 4 };
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} takes a value"));
         match flag.as_str() {
@@ -89,13 +87,6 @@ fn parse_args() -> Result<(String, Args), String> {
             "--least" => parsed.least = value()?.parse().map_err(|_| "--least takes a count")?,
             "--busiest" => parsed.busiest = true,
             "--threads" => parsed.threads = value()?.parse().map_err(|_| "--threads takes a count")?,
-            "--chroma" => {
-                parsed.chroma = match value()?.as_str() {
-                    "444" => Chroma::Full,
-                    "420" => Chroma::Subsampled,
-                    other => return Err(format!("{other}: not 444 or 420")),
-                }
-            }
             other => return Err(format!("{other}: not a flag")),
         }
     }
@@ -262,13 +253,6 @@ fn ivf_header(width: u16, height: u16) -> [u8; 32] {
     header
 }
 
-fn chroma_name(chroma: Chroma) -> &'static str {
-    match chroma {
-        Chroma::Full => "444",
-        Chroma::Subsampled => "420",
-    }
-}
-
 /// One stream being coded from a capture's frames and written: the encoder,
 /// the IVF and its CSV. Written under a name of its own making and given the
 /// name it is to keep when it is whole, so a stream cut short is never taken
@@ -287,29 +271,26 @@ struct Output {
 }
 
 impl Output {
-    fn new(dir: &Path, size: (u16, u16), chroma: Chroma, quality: u8, threads: usize) -> Result<Self, Error> {
+    fn new(dir: &Path, size: (u16, u16), quality: u8, threads: usize) -> Result<Self, Error> {
         let part = dir.join(format!(".vp9cap-{}.part", std::process::id()));
         let mut ivf = BufWriter::new(File::create(&part)?);
         ivf.write_all(&ivf_header(size.0, size.1))?;
         let mut csv = BufWriter::new(File::create(part.with_extension("csv"))?);
         csv.write_all(b"frame,ms,bytes,keyframe,quality\n")?;
-        Ok(Self { stream: Stream::new(size.0, size.1, chroma, quality, threads)?, size, ivf, csv, part, began: None, frames: 0, first: Vec::new(), unit: Vec::new() })
+        Ok(Self { stream: Stream::new(size.0, size.1, quality, threads)?, size, ivf, csv, part, began: None, frames: 0, first: Vec::new(), unit: Vec::new() })
     }
 
     /// Code `frame` as the session did, or as a keyframe of the whole picture
-    /// where the stream starts with it. A frame the encoder makes nothing of
-    /// is not a frame of the stream.
+    /// where the stream starts with it.
     fn frame(&mut self, frame: &Frame<'_>) -> Result<(), Error> {
         let starting = self.began.is_none();
         if self.stream.quality() != frame.quality {
-            self.stream.set_quality(frame.quality)?;
+            self.stream.set_quality(frame.quality);
         }
         self.unit.clear();
         let changed = if starting { None } else { frame.changed };
         self.stream.read_bgrx(frame.pixels, usize::from(self.size.0) * 4, changed)?;
-        let Some(keyframe) = self.stream.encode(starting || frame.keyframe, &mut self.unit)? else {
-            return Ok(());
-        };
+        let keyframe = self.stream.encode(starting || frame.keyframe, &mut self.unit)?;
         let micros = frame.at.as_micros() as u64;
         let ms = (micros - *self.began.get_or_insert(micros)) / 1000;
         if starting {
@@ -354,7 +335,7 @@ fn streams(args: &Args) -> Result<(), Error> {
         written.push(size);
         let nth = written.iter().filter(|&&s| s == size).count();
         let again = if nth > 1 { format!("-{nth}") } else { String::new() };
-        args.dir.join(format!("{}-{}x{}-{}{again}.ivf", args.name, size.0, size.1, chroma_name(args.chroma)))
+        args.dir.join(format!("{}-{}x{}-444{again}.ivf", args.name, size.0, size.1))
     };
     let keep = |done: Output, written: &mut Vec<(u16, u16)>| {
         if done.frames < args.least.max(1) {
@@ -370,7 +351,7 @@ fn streams(args: &Args) -> Result<(), Error> {
         }
         let output = match &mut output {
             Some(output) => output,
-            None => output.insert(Output::new(&args.dir, frame.size, args.chroma, frame.quality, args.threads)?),
+            None => output.insert(Output::new(&args.dir, frame.size, frame.quality, args.threads)?),
         };
         output.frame(&frame)?;
     }
@@ -409,17 +390,12 @@ fn sample(args: &Args) -> Result<(), Error> {
         }
         let output = match &mut output {
             Some(output) => output,
-            None => output.insert(Output::new(&args.dir, frame.size, args.chroma, frame.quality, args.threads)?),
+            None => output.insert(Output::new(&args.dir, frame.size, frame.quality, args.threads)?),
         };
         output.frame(&frame)?;
     }
     drop(source);
     let output = output.expect("the run is in the capture");
-    if (output.frames as usize) < args.frames {
-        let frames = output.frames;
-        output.discard();
-        return Err(format!("the encoder made {frames} frames of the {} from frame {start} of the {width}x{height} run", args.frames).into());
-    }
     let Some(shape) = keyframe_shape(&output.first) else {
         output.discard();
         return Err("the stream's first frame is not a keyframe this reads".into());

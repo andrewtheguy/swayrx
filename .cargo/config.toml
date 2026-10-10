@@ -1,0 +1,5 @@
+# screen-vp9-native, the VP9 encoder, has AVX2 kernels on amd64, which that
+# target's baseline lacks, and refuses to build without them.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+avx2"]
+rustdocflags = ["-C", "target-feature=+avx2"]

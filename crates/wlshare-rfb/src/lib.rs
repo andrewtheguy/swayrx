@@ -9,8 +9,9 @@
 //! The crate is platform-independent so that all of it is unit-tested on any
 //! machine, the daemon being buildable only where libwayland and libxkbcommon
 //! are. The audio extension's FLAC encoder is libFLAC and its Opus encoder
-//! libopus, each from a prebuilt static archive, as libvpx is under
-//! `screen-vp9`, so the crate builds and runs with neither installed.
+//! libopus, each from a prebuilt static archive, and its VP9 encoder is
+//! `screen-vp9-native`'s, which is Rust alone, so the crate builds and runs
+//! with none of them installed.
 //! Tests here use an independent decoder for
 //! every encoder, so the two halves cannot share a misunderstanding.
 //!
@@ -22,8 +23,7 @@
 //!   best lossless encoding, and the remotex gateway lists it as its first
 //!   standard pixel encoding. **The VP9 encoding** is a private one for the
 //!   gateway: the whole framebuffer as one VP9 stream, 4:4:4 at a quality its
-//!   owner sets unless the client asked for otherwise ([`vp9`]), for a desktop
-//!   that moves. Raw is produced before the client's first `SetEncodings`, where
+//!   owner sets ([`vp9`]), for a desktop that moves. Raw is produced before the client's first `SetEncodings`, where
 //!   the RFC requires it, and for a client whose list names neither. Tight,
 //!   Hextile, RRE, CopyRect and every other lossy encoding are absent.
 //! - **32-bit true colour only.** The server's native format is the compositor's
@@ -85,6 +85,8 @@ pub mod pixel;
 pub mod rsa_aes;
 pub mod scroll;
 pub mod vp9;
+#[cfg(test)]
+mod vp9_decoder;
 pub mod zrle;
 
 /// Raw: pixels as they are, in the client's format. RFC 6143 §7.7.1 requires
