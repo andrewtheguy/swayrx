@@ -54,7 +54,7 @@
 //! Ordinarily a frame only goes out when something changed, so a desktop that
 //! stops right after the link coarsened it would keep that picture. Once a frame
 //! below the configured quality has been delivered and nothing has changed for
-//! [`SETTLE_IDLE`], the dial is taken back to the configured quality and the
+//! [`SETTLE_IDLE`](screen_vp9::walk::SETTLE_IDLE), the dial is taken back to the configured quality and the
 //! unchanged picture is sent again as one inter frame, coded whole, which
 //! sharpens every block without a keyframe. A list that drops VP9
 //! is answered with the whole framebuffer in the standard encoding it selected
@@ -337,7 +337,6 @@ pub async fn run(id: ClientId, socket: TcpStream, shared: Arc<Shared>, config: A
         walk,
         vp9_in_flight: None,
         frame_sent: None,
-        coarse_since: None,
         settle_owed: false,
         continuous_supported: false,
         fence_supported: false,
@@ -527,11 +526,6 @@ struct Session {
     /// read when it is asked for, so a step the fence of that frame brings
     /// paces the very next one.
     frame_sent: Option<Instant>,
-    /// The last VP9 frame went out below the configured quality, and the
-    /// client has had it since then: the desktop is settled at the configured
-    /// quality once it has stayed quiet [`SETTLE_IDLE`] from there. `None`
-    /// once a frame at the configured quality has gone out.
-    coarse_since: Option<Instant>,
     /// The unchanged picture is owed as a frame at the configured quality.
     settle_owed: bool,
     continuous_supported: bool,
@@ -594,13 +588,6 @@ struct Session {
     scratch: Vec<u8>,
     out: Vec<u8>,
 }
-
-/// How long a desktop sent below the configured VP9 quality must stay quiet,
-/// with the client holding the last frame, before it is settled at that
-/// quality. Long enough that a pause in motion is not chased with a redundant
-/// frame, short enough that the picture sharpens while the eye is still on it.
-/// remotex's `CLEANUP_IDLE`.
-const SETTLE_IDLE: Duration = Duration::from_millis(500);
 
 /// A damaged rectangle and its pixels, taken out of the framebuffer.
 struct Piece {
@@ -811,7 +798,6 @@ impl Session {
                     let new_ceiling = stream.quality != self.stream.quality;
                     self.stream = stream;
                     self.walk = QualityWalk::new(stream.quality, self.config.capture, stream.adaptive);
-                    self.coarse_since = None;
                     self.settle_owed = false;
                     if rechroma {
                         self.vp9 = None;
@@ -842,7 +828,9 @@ impl Session {
                     // alone would leave most of it on the screen.
                     self.vp9 = None;
                     self.seen = 0;
-                    self.coarse_since = None;
+                    // The picture the client holds is the stream's no longer,
+                    // and owes no settle.
+                    self.walk.sent(self.walk.ceiling(), Instant::now());
                     self.settle_owed = false;
                 }
                 self.use_vp9 = vp9;
@@ -1003,9 +991,7 @@ impl Session {
                         self.follow_walk(moved)?;
                         // Quiet is counted from when the client had the frame,
                         // not from when it was written.
-                        if self.coarse_since.is_some() {
-                            self.coarse_since = Some(now);
-                        }
+                        self.walk.delivered(now);
                     }
                 }
             }
@@ -1443,7 +1429,7 @@ impl Session {
                 // The frames behind it queue behind its crossing, a settle's too.
                 self.walk.keyframe(sent);
             }
-            self.coarse_since = self.walk.coarse(quality).then_some(sent);
+            self.walk.sent(quality, sent);
             self.settle_owed = false;
             self.frame_sent = Some(sent);
         }
@@ -1457,9 +1443,9 @@ impl Session {
             }
             if self.fence_supported {
                 self.vp9_in_flight = Some((sent, verdict));
-            } else if self.coarse_since.is_some() {
+            } else {
                 // Without Fence, a written frame is as delivered as it gets.
-                self.coarse_since = Some(now);
+                self.walk.delivered(now);
             }
         }
         self.seen = generation;
@@ -1488,9 +1474,7 @@ impl Session {
         self.out.extend_from_slice(&msg::rect_header(0, 0, width, height, ENCODING_VP9));
         let (encoder, pixels, out) = (self.vp9.as_mut().expect("made above"), &self.scratch, &mut self.out);
         let keyframe = full || self.keyframe_owed;
-        if settling {
-            encoder.set_quality(self.stream.quality).context("moving the VP9 quality for a settle")?;
-        }
+        let stride = usize::from(width) * 4;
         let changed: Option<Vec<vp9::Rect>> =
             changed.map(|rects| rects.iter().map(|r| vp9::Rect { x: r.x, y: r.y, width: r.width, height: r.height }).collect());
         if let Some(dir) = &self.config.capture_frames {
@@ -1507,16 +1491,22 @@ impl Session {
             };
             // The frame as the encoder is handed it, the settle's dial
             // included; what it says is what the stream reads.
-            tokio::task::block_in_place(|| capture.frame((width, height), encoder.quality(), keyframe, changed.as_deref(), pixels, usize::from(width) * 4))
+            let quality = if settling { self.stream.quality } else { encoder.quality() };
+            tokio::task::block_in_place(|| capture.frame((width, height), quality, keyframe, changed.as_deref(), pixels, stride))
                 .context("writing the VP9 capture")?;
         }
         // Tens of milliseconds for a large desktop that changed all over, which
         // is the worker's to spend and not the runtime's to wait on.
-        let encoded = tokio::task::block_in_place(|| encoder.encode_rect(pixels, usize::from(width) * 4, changed.as_deref(), keyframe, out))
-            .with_context(|| format!("encoding a {width}x{height} VP9 frame"));
-        if settling {
-            encoder.set_quality(self.walk.quality()).context("returning the VP9 quality after a settle")?;
-        }
+        // The settle's frame is the whole picture at the configured quality,
+        // and leaves the dial at the walk's.
+        let encoded = tokio::task::block_in_place(|| {
+            if settling {
+                encoder.settle_rect(pixels, stride, self.stream.quality, keyframe, out)
+            } else {
+                encoder.encode_rect(pixels, stride, changed.as_deref(), keyframe, out)
+            }
+        })
+        .with_context(|| format!("encoding a {width}x{height} VP9 frame"));
         if !encoded? {
             self.out.truncate(rect_at);
             return Ok(None);
@@ -1550,7 +1540,7 @@ impl Session {
         if !self.use_vp9 || self.settle_owed || self.vp9_in_flight.is_some() || *self.frames.borrow() > self.seen {
             return None;
         }
-        self.coarse_since.map(|since| since + SETTLE_IDLE)
+        self.walk.settle_at()
     }
 
     /// Owe the unchanged picture as one inter frame at the configured
@@ -1563,7 +1553,6 @@ impl Session {
             self.stream.quality,
             self.walk.quality()
         );
-        self.coarse_since = None;
         self.settle_owed = true;
         Ok(())
     }

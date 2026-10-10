@@ -229,9 +229,31 @@ impl Vp9Encoder {
     /// the encoder produced no frame, since an empty rectangle is not a frame a
     /// client can decode and the pixels are the next frame's to carry.
     pub fn encode_rect(&mut self, pixels: &[u8], stride: usize, changed: Option<&[Rect]>, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
+        self.framed(out, |stream, out| stream.encode_bgrx(pixels, stride, changed, keyframe, out))
+    }
+
+    /// Settle the picture at `quality`: encode it whole and at that quality,
+    /// as [`Self::encode_rect`] does a picture told nothing of its damage, and
+    /// leave the dial where it was. What a desktop that went quiet while its
+    /// link had it coarse is sent once: an inter frame unless `keyframe`
+    /// asks, which sharpens every block, with the frames after it at what
+    /// the link bears again.
+    ///
+    /// Returns whether a body was appended, as [`Self::encode_rect`] does. An
+    /// encoder that would not move its dial back is an error, with `out` as it
+    /// was: the encoder stays at the [`Self::quality`] it reports, and its
+    /// next frame is a keyframe.
+    pub fn settle_rect(&mut self, pixels: &[u8], stride: usize, quality: u8, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
+        self.framed(out, |stream, out| stream.settle_bgrx(pixels, stride, quality, keyframe, out))
+    }
+
+    /// Append a rectangle's body to `out`: the length word, and the frame
+    /// `encode` appends. Nothing is appended for an encode that produced no
+    /// frame, failed, or made a frame over the ceiling.
+    fn framed(&mut self, out: &mut Vec<u8>, encode: impl FnOnce(&mut screen_vp9::Stream, &mut Vec<u8>) -> Result<Option<bool>, screen_vp9::Error>) -> Result<bool, Vp9Error> {
         let length_at = out.len();
         out.extend_from_slice(&[0; 4]);
-        match self.stream.encode_bgrx(pixels, stride, changed, keyframe, out) {
+        match encode(&mut self.stream, out) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 out.truncate(length_at);
@@ -318,6 +340,35 @@ mod tests {
         let len = u32::from_be_bytes(out[1..5].try_into().unwrap()) as usize;
         assert_eq!(len, out.len() - 5, "the length word is the frame's");
         out.split_off(5)
+    }
+
+    /// The settle's rectangle is framed as any other, sharpens the picture a
+    /// coarse dial left without a keyframe, and leaves the dial where it was.
+    #[test]
+    fn a_settle_sharpens_the_picture_and_leaves_the_dial() {
+        let (width, height) = (64, 48);
+        let (pixels, _) = stems(width, height);
+        let mut encoder = Vp9Encoder::new(width as u16, height as u16, Chroma::Full, QUALITY_MIN).unwrap();
+        let mut decoder = Vp9Decoder::new().unwrap();
+        let mut back = vec![0; width * height * 4];
+        let mut error = |frame: &[u8]| {
+            decoder.decode_rect(frame, width, height, &mut back, width * 4).unwrap();
+            back.chunks(4).zip(pixels.chunks(4)).map(|(got, want)| (0..3).map(|c| u64::from(got[c].abs_diff(want[c]))).sum::<u64>()).sum::<u64>()
+        };
+        let coarse = error(&encode(&mut encoder, &pixels, false));
+
+        let mut out = vec![0xEE];
+        assert!(encoder.settle_rect(&pixels, width * 4, QUALITY_MAX, false, &mut out).expect("a settle"), "a frame");
+        assert_eq!((out[0], u32::from_be_bytes(out[1..5].try_into().unwrap()) as usize), (0xEE, out.len() - 5), "the length word is the frame's");
+        let frame = out.split_off(5);
+        assert!(screen_vp9::frame_header(&frame).is_some_and(|header| !header.keyframe), "the settle cost a keyframe");
+        let settled = error(&frame);
+        assert!(settled < coarse / 2, "the settle left the picture at error {settled} of {coarse}");
+        assert_eq!((encoder.quality(), encoder.coarsest()), (QUALITY_MIN, QUALITY_MAX));
+
+        let mut out = vec![0xEE];
+        assert!(matches!(encoder.settle_rect(&[0; 12], 128, QUALITY_MAX, false, &mut out), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
+        assert_eq!((out, encoder.quality()), (vec![0xEE], QUALITY_MIN), "a settle that failed left something behind");
     }
 
     #[test]
