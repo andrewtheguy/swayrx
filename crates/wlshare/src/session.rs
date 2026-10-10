@@ -1339,17 +1339,23 @@ impl Session {
             let stride = fb.stride();
             if self.use_vp9 {
                 // A VP9 frame is the whole picture, of which the encoder reads
-                // the rows that changed: those are copied to their own place,
-                // and the rest of `scratch` is whatever an earlier frame left.
-                // Copied out to whole pairs of rows, an even one and the odd
-                // one under it, which a 4:2:0 stream reads together.
+                // the rectangles that changed: those are copied to their own
+                // place, and the rest of `scratch` is what the frames before
+                // left there, which is the picture as the client holds it.
+                // Copied out to whole 2×2 groups, an even row and column with
+                // the odd ones after them, which a 4:2:0 stream reads together.
                 let row_len = usize::from(fb.width) * 4;
                 self.scratch.resize(row_len * usize::from(fb.height), 0);
                 let whole = [Rect::whole(fb.width, fb.height)];
                 for rect in damage.as_deref().unwrap_or(&whole) {
+                    let right = (usize::from(rect.x) + usize::from(rect.width)).next_multiple_of(2).min(usize::from(fb.width));
                     let bottom = (usize::from(rect.y) + usize::from(rect.height)).next_multiple_of(2).min(usize::from(fb.height));
+                    let cols = (usize::from(rect.x) & !1) * 4..right * 4;
+                    if cols.is_empty() {
+                        continue;
+                    }
                     for row in usize::from(rect.y) & !1..bottom {
-                        self.scratch[row * row_len..][..row_len].copy_from_slice(&fb.pixels[row * stride..][..row_len]);
+                        self.scratch[row * row_len..][cols.clone()].copy_from_slice(&fb.pixels[row * stride..][cols.clone()]);
                     }
                 }
                 changed = damage;
