@@ -7,7 +7,7 @@
 //! ```text
 //! vp9-sink ADDR --size WxH [--quality 1..100] [--held] [--seconds N]
 //!          [--frames N] [--resize SECS:WxH] [--slow SECS:SECS:MILLIS]
-//!          [--keyframe SECS] [--keys]
+//!          [--keyframe SECS] [--keys] [--ivf FILE]
 //! ```
 //!
 //! The handshake is RFB 3.8 with security None, so the daemon is one started
@@ -30,9 +30,13 @@
 //! every line of its standard input is a keysym in hexadecimal, pressed and
 //! let go as a KeyEvent each, so that what plays the desktop types through
 //! the daemon as a person at a client does, on the daemon's own keyboard.
+//! With `--ivf` the frames are not thrown away but written to that file as
+//! an IVF, in the order they came and one a tick, for a decoder that is not
+//! this repository's to be run on what a session was sent.
 //! Every second a line
 //! says how many frames and bytes came and how many were keyframes.
 
+use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
@@ -53,6 +57,21 @@ struct Args {
     slow: Option<(f64, (f64, u64))>,
     keyframe: Option<f64>,
     keys: bool,
+    ivf: Option<String>,
+}
+
+/// An IVF's header for a VP9 stream of this size. The frame count is left at
+/// zero: a session ends when it ends, and no decoder needs it.
+fn ivf_header(width: u16, height: u16) -> [u8; 32] {
+    let mut header = [0u8; 32];
+    header[..4].copy_from_slice(b"DKIF");
+    header[6..8].copy_from_slice(&32u16.to_le_bytes());
+    header[8..12].copy_from_slice(b"VP90");
+    header[12..14].copy_from_slice(&width.to_le_bytes());
+    header[14..16].copy_from_slice(&height.to_le_bytes());
+    header[16..20].copy_from_slice(&60u32.to_le_bytes());
+    header[20..24].copy_from_slice(&1u32.to_le_bytes());
+    header
 }
 
 fn size(s: &str) -> Result<(u16, u16), String> {
@@ -68,7 +87,7 @@ fn at<T>(s: &str, parse: impl Fn(&str) -> Result<T, String>) -> Result<(f64, T),
 fn parse_args() -> Result<Args, String> {
     let mut args = std::env::args().skip(1);
     let addr = args.next().ok_or("an address to connect to")?;
-    let mut parsed = Args { addr, size: (0, 0), quality: 90, held: false, seconds: 30, frames: 0, resize: None, slow: None, keyframe: None, keys: false };
+    let mut parsed = Args { addr, size: (0, 0), quality: 90, held: false, seconds: 30, frames: 0, resize: None, slow: None, keyframe: None, keys: false, ivf: None };
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} takes a value"));
         match flag.as_str() {
@@ -80,6 +99,7 @@ fn parse_args() -> Result<Args, String> {
             "--resize" => parsed.resize = Some(at(&value()?, size)?),
             "--slow" => parsed.slow = Some(at(&value()?, |s| at(s, |ms| ms.parse().map_err(|_| format!("{ms}: not milliseconds"))))?),
             "--keys" => parsed.keys = true,
+            "--ivf" => parsed.ivf = Some(value()?),
             "--keyframe" => parsed.keyframe = Some(value()?.parse().map_err(|_| "seconds")?),
             other => return Err(format!("{other}: not a flag")),
         }
@@ -152,6 +172,14 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let last = began + Duration::from_secs(args.seconds * 10);
     let (mut resize, mut keyframe) = (args.resize, args.keyframe);
     let mut slowed = false;
+    let mut ivf = match &args.ivf {
+        Some(path) => {
+            let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+            file.write_all(&ivf_header(args.size.0, args.size.1))?;
+            Some(file)
+        }
+        None => None,
+    };
     let mut keys = args.keys.then(|| BufReader::new(tokio::io::stdin()).lines());
     let mut buf = Vec::with_capacity(1 << 20);
     let mut chunk = vec![0u8; 1 << 16];
@@ -219,6 +247,11 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                                 if screen_vp9_native::frame_header(&frame).is_some_and(|h| h.keyframe) {
                                     keyframes += 1;
                                 }
+                                if let Some(file) = &mut ivf {
+                                    file.write_all(&(frame.len() as u32).to_le_bytes())?;
+                                    file.write_all(&(frames - 1).to_le_bytes())?;
+                                    file.write_all(&frame)?;
+                                }
                             }
                             RectBody::ExtendedDesktopSize { .. } => {
                                 (width, height) = (rect.width, rect.height);
@@ -242,6 +275,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             second = elapsed;
             eprintln!("vp9-sink: {second}s {frames} frames {bytes} bytes {keyframes} keyframes");
         }
+    }
+    if let Some(mut file) = ivf {
+        file.flush()?;
     }
     eprintln!("vp9-sink: done, {frames} frames {bytes} bytes {keyframes} keyframes");
     Ok(())
