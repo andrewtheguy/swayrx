@@ -42,7 +42,7 @@ sound-opus = { git = "https://github.com/andrewtheguy/sound-opus", tag = "v0.0.4
 # 4:4:4 and nothing else, pinned to its release tag. Nothing is linked but
 # Rust. Its kernels are AVX2 on amd64, which that target's baseline lacks and
 # this workspace's `.cargo/config.toml` sets, and NEON on arm64.
-screen-vp9-native = { git = "https://github.com/andrewtheguy/screen-vp9-native", tag = "v0.0.1-alpha.1" }
+screen-vp9-native = { git = "https://github.com/andrewtheguy/screen-vp9-native", tag = "v0.0.1-alpha.2" }
 
 [dev-dependencies]
 # libvpx's decoder, which the VP9 encoding's tests read every frame back with
