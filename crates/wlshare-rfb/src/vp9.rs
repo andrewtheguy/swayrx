@@ -208,43 +208,50 @@ impl Vp9Encoder {
         Ok(self.stream.set_quality(quality)?)
     }
 
-    /// Encode the picture — [`Self::size`] of `B, G, R, X` pixels whose rows
-    /// are `stride` bytes apart — and append the rectangle's body to `out`: the
-    /// length word and the frame. `keyframe` makes it one a decoder can start
-    /// from; an encoder's first frame is one either way.
+    /// Read the picture — [`Self::size`] of `B, G, R, X` pixels whose rows
+    /// are `stride` bytes apart — for the next frame to carry
+    /// ([`Self::encode`]). It is read into the encoder's own planes, so
+    /// `pixels` is the framebuffer itself, for as long as the conversion
+    /// takes and no longer: nothing of it is kept.
     ///
-    /// `changed` is the damage since the picture encoded before, or `None`
-    /// for a picture that may differ anywhere. With it only the rectangles
-    /// are read from `pixels`, and at 4:2:0 the pixels that share a chroma
-    /// sample with one of theirs — a 2×2 group, an even row and column with
-    /// the odd ones after them, is read together — so those must hold the
-    /// picture too. The rest may hold anything. Only the blocks the rectangles touch
-    /// are coded: the rest of the
-    /// frame is the picture the client already holds, at the quality it holds
-    /// it. A keyframe, an encoder's first frame and the frame after one that
-    /// produced nothing are the whole picture whatever `changed` says, and
-    /// read all of `pixels`.
+    /// `changed` is the damage since the picture read before, or `None` for
+    /// a picture that may differ anywhere. With it only the rectangles are
+    /// read from `pixels`, and at 4:2:0 the pixels that share a chroma sample
+    /// with one of theirs — a 2×2 group, an even row and column with the odd
+    /// ones after them, is read together. An encoder's first read is the
+    /// whole picture whatever `changed` says.
+    pub fn read(&mut self, pixels: &[u8], stride: usize, changed: Option<&[Rect]>) -> Result<(), Vp9Error> {
+        Ok(self.stream.read_bgrx(pixels, stride, changed)?)
+    }
+
+    /// Encode the picture as it was last read and append the rectangle's body
+    /// to `out`: the length word and the frame. `keyframe` makes it one a
+    /// decoder can start from; an encoder's first frame is one either way.
+    ///
+    /// Only the blocks the damage read since the last frame touches are
+    /// coded: the rest of the frame is the picture the client already holds,
+    /// at the quality it holds it. A keyframe, a picture read whole and the
+    /// frame after one that produced nothing are the whole picture.
     ///
     /// Returns whether a body was appended: `false`, with `out` as it was, when
     /// the encoder produced no frame, since an empty rectangle is not a frame a
     /// client can decode and the pixels are the next frame's to carry.
-    pub fn encode_rect(&mut self, pixels: &[u8], stride: usize, changed: Option<&[Rect]>, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
-        self.framed(out, |stream, out| stream.encode_bgrx(pixels, stride, changed, keyframe, out))
+    pub fn encode(&mut self, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
+        self.framed(out, |stream, out| stream.encode(keyframe, out))
     }
 
-    /// Settle the picture at `quality`: encode it whole and at that quality,
-    /// as [`Self::encode_rect`] does a picture told nothing of its damage, and
-    /// leave the dial where it was. What a desktop that went quiet while its
-    /// link had it coarse is sent once: an inter frame unless `keyframe`
-    /// asks, which sharpens every block, with the frames after it at what
-    /// the link bears again.
+    /// Settle the picture at `quality`: encode it as it was last read, whole
+    /// and at that quality, and leave the dial where it was. What a desktop
+    /// that went quiet while its link had it coarse is sent once: an inter
+    /// frame unless `keyframe` asks, which sharpens every block, with the
+    /// frames after it at what the link bears again.
     ///
-    /// Returns whether a body was appended, as [`Self::encode_rect`] does. An
+    /// Returns whether a body was appended, as [`Self::encode`] does. An
     /// encoder that would not move its dial back is an error, with `out` as it
     /// was: the encoder stays at the [`Self::quality`] it reports, and its
     /// next frame is a keyframe.
-    pub fn settle_rect(&mut self, pixels: &[u8], stride: usize, quality: u8, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
-        self.framed(out, |stream, out| stream.settle_bgrx(pixels, stride, quality, keyframe, out))
+    pub fn settle(&mut self, quality: u8, keyframe: bool, out: &mut Vec<u8>) -> Result<bool, Vp9Error> {
+        self.framed(out, |stream, out| stream.settle(quality, keyframe, out))
     }
 
     /// Append a rectangle's body to `out`: the length word, and the frame
@@ -335,7 +342,8 @@ mod tests {
     fn encode(encoder: &mut Vp9Encoder, pixels: &[u8], keyframe: bool) -> Vec<u8> {
         let (width, _) = encoder.size();
         let mut out = vec![0xEE];
-        assert!(encoder.encode_rect(pixels, usize::from(width) * 4, None, keyframe, &mut out).expect("an encode"), "a frame");
+        encoder.read(pixels, usize::from(width) * 4, None).expect("a read");
+        assert!(encoder.encode(keyframe, &mut out).expect("an encode"), "a frame");
         assert_eq!(out[0], 0xEE, "appended, not overwritten");
         let len = u32::from_be_bytes(out[1..5].try_into().unwrap()) as usize;
         assert_eq!(len, out.len() - 5, "the length word is the frame's");
@@ -358,7 +366,7 @@ mod tests {
         let coarse = error(&encode(&mut encoder, &pixels, false));
 
         let mut out = vec![0xEE];
-        assert!(encoder.settle_rect(&pixels, width * 4, QUALITY_MAX, false, &mut out).expect("a settle"), "a frame");
+        assert!(encoder.settle(QUALITY_MAX, false, &mut out).expect("a settle"), "a frame");
         assert_eq!((out[0], u32::from_be_bytes(out[1..5].try_into().unwrap()) as usize), (0xEE, out.len() - 5), "the length word is the frame's");
         let frame = out.split_off(5);
         assert!(screen_vp9::frame_header(&frame).is_some_and(|header| !header.keyframe), "the settle cost a keyframe");
@@ -366,9 +374,11 @@ mod tests {
         assert!(settled < coarse / 2, "the settle left the picture at error {settled} of {coarse}");
         assert_eq!((encoder.quality(), encoder.coarsest()), (QUALITY_MIN, QUALITY_MAX));
 
+        // An encoder nothing was read into has nothing to settle.
         let mut out = vec![0xEE];
-        assert!(matches!(encoder.settle_rect(&[0; 12], 128, QUALITY_MAX, false, &mut out), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
-        assert_eq!((out, encoder.quality()), (vec![0xEE], QUALITY_MIN), "a settle that failed left something behind");
+        let mut unread = Vp9Encoder::new(width as u16, height as u16, Chroma::Full, QUALITY_MIN).unwrap();
+        assert!(matches!(unread.settle(QUALITY_MAX, false, &mut out), Err(Vp9Error::Codec(screen_vp9::Error::Unread))));
+        assert_eq!((out, unread.quality()), (vec![0xEE], QUALITY_MIN), "a settle that failed left something behind");
     }
 
     #[test]
@@ -444,7 +454,8 @@ mod tests {
         let near = |got: [u8; 3], want: [u8; 4]| (0..3).all(|c| got[c].abs_diff(want[c]) <= 24);
         let frame = |encoder: &mut Vp9Encoder, pixels: &[u8], changed: Option<&[Rect]>, keyframe: bool| {
             let mut out = Vec::new();
-            assert!(encoder.encode_rect(pixels, stride, changed, keyframe, &mut out).expect("an encode"), "a frame");
+            encoder.read(pixels, stride, changed).expect("a read");
+            assert!(encoder.encode(keyframe, &mut out).expect("an encode"), "a frame");
             out.split_off(4)
         };
         let mut encoder = Vp9Encoder::new(width as u16, height as u16, Chroma::Full, QUALITY_MAX).unwrap();
@@ -471,10 +482,11 @@ mod tests {
             assert!(near(at(&out, x, y), BACK), "({x}, {y}), outside the damage, came back {:?}", at(&out, x, y));
         }
 
-        // A keyframe is the whole buffer, whatever it is told.
+        // A picture read whole is the whole buffer, and a keyframe where
+        // one is asked.
         let mut all = whole.clone();
         lit(&mut all, Rect { x: 0, y: 64, width: 96, height: 16 });
-        let third = frame(&mut encoder, &all, Some(&[damage]), true);
+        let third = frame(&mut encoder, &all, None, true);
         assert!(screen_vp9::frame_header(&third).is_some_and(|header| header.keyframe));
         decoder.decode_rect(&third, width, height, &mut out, stride).unwrap();
         assert!(near(at(&out, 48, 24), BACK) && near(at(&out, 48, 70), LIT), "the keyframe was not the whole picture");
@@ -490,7 +502,7 @@ mod tests {
         assert!(decoder.decode_rect(&[0xFF, 0x00, 0x12], 32, 16, &mut out, 128).is_err());
         assert!(matches!(decoder.decode_rect(&frame, 32, 16, &mut out[..10], 128), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
         assert!(matches!(Vp9Encoder::new(0, 16, Chroma::Full, 60), Err(Vp9Error::Codec(screen_vp9::Error::Empty(0, 16)))));
-        assert!(matches!(encoder.encode_rect(&[0; 12], 128, None, false, &mut Vec::new()), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
+        assert!(matches!(encoder.read(&[0; 12], 128, None), Err(Vp9Error::Codec(screen_vp9::Error::Buffer { .. }))));
 
         // A 4:2:0 frame, which the gateway asks for, is a VP9 frame of the
         // same framing — and not one a 4:4:4 decoder takes.

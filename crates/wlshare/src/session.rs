@@ -582,9 +582,10 @@ struct Session {
     announce_eds: bool,
     events: broadcast::Receiver<Event>,
     frames: watch::Receiver<u64>,
-    /// Pixels copied out of the framebuffer for encoding: rect by rect, or
-    /// for a VP9 frame the whole picture's rows in place, of which only the
-    /// damaged ones are the frame's.
+    /// Pixels copied out of the framebuffer for encoding, rect by rect. A
+    /// VP9 frame is read straight into its stream and copies none, unless
+    /// the frames are captured: then this is the whole picture in place, as
+    /// the client holds it, which the capture is written from.
     scratch: Vec<u8>,
     out: Vec<u8>,
 }
@@ -1299,16 +1300,36 @@ impl Session {
             return Ok(());
         }
 
-        // Under the lock: decide, and copy the pixels out. Encoding happens after.
+        // Under the lock: decide, and take the pixels: read into the VP9
+        // stream's planes, or copied out for the other encodings. Encoding
+        // happens after.
         let mut pieces: Vec<Piece> = Vec::new();
         let mut resized = None;
         let generation;
         let size;
         let full;
         // Where a VP9 frame's picture changed, or `None` for a whole one.
-        let changed: Option<Vec<Rect>>;
+        let changed: Option<Vec<vp9::Rect>>;
+        // Whether the VP9 stream was made for this frame, which is then its
+        // first.
+        let mut fresh = false;
         {
-            let fb = self.shared.desks[self.desk].framebuffer.lock().unwrap();
+            // A VP9 stream is made for the desktop's size with the lock let
+            // go, since making one takes a third of a second at 4K and the
+            // compositor waits on the lock; the desktop is then looked at
+            // again, which may have changed size meanwhile.
+            let fb = loop {
+                let fb = self.shared.desks[self.desk].framebuffer.lock().unwrap();
+                let (width, height) = (fb.width, fb.height);
+                if !self.use_vp9 || !fb.painted || self.vp9.as_ref().is_some_and(|encoder| encoder.size() == (width, height)) {
+                    break fb;
+                }
+                drop(fb);
+                let encoder = Vp9Encoder::new(width, height, self.stream.chroma, self.walk.quality())
+                    .with_context(|| format!("starting a {} VP9 stream for a {width}x{height} desktop", self.stream.chroma.name()))?;
+                self.vp9 = Some(encoder);
+                fresh = true;
+            };
             if !fb.painted {
                 drop(fb);
                 answered(self);
@@ -1320,15 +1341,17 @@ impl Session {
                 resized = Some(fb.resize_origin);
             }
             full = resized.is_some() || self.pending == Some(false) || self.seen == 0;
-            // A settle is the whole picture whether or not anything changed,
-            // and an inter frame all the same. So is a VP9 frame that starts
-            // its stream over, which has no picture to be damage to.
-            let starting = self.use_vp9 && (self.keyframe_owed || self.vp9.as_ref().is_none_or(|encoder| encoder.size() != size));
-            let damage = if full || self.settle_owed || starting {
+            // A VP9 frame that starts its stream over is the whole picture,
+            // which has none to be damage to. A settle is a frame whether or
+            // not anything changed, and codes the whole picture, of which it
+            // reads what did.
+            let starting = self.use_vp9 && (self.keyframe_owed || fresh);
+            let settling = self.use_vp9 && self.settle_owed;
+            let damage = if full || starting {
                 None
             } else {
                 match fb.damage_since(self.seen) {
-                    Some(rects) if rects.is_empty() => {
+                    Some(rects) if rects.is_empty() && !settling => {
                         drop(fb);
                         answered(self);
                         return Ok(());
@@ -1338,27 +1361,41 @@ impl Session {
             };
             let stride = fb.stride();
             if self.use_vp9 {
-                // A VP9 frame is the whole picture, of which the encoder reads
-                // the rectangles that changed: those are copied to their own
-                // place, and the rest of `scratch` is what the frames before
-                // left there, which is the picture as the client holds it.
-                // Copied out to whole 2×2 groups, an even row and column with
-                // the odd ones after them, which a 4:2:0 stream reads together.
-                let row_len = usize::from(fb.width) * 4;
-                self.scratch.resize(row_len * usize::from(fb.height), 0);
-                let whole = [Rect::whole(fb.width, fb.height)];
-                for rect in damage.as_deref().unwrap_or(&whole) {
-                    let right = (usize::from(rect.x) + usize::from(rect.width)).next_multiple_of(2).min(usize::from(fb.width));
-                    let bottom = (usize::from(rect.y) + usize::from(rect.height)).next_multiple_of(2).min(usize::from(fb.height));
-                    let cols = (usize::from(rect.x) & !1) * 4..right * 4;
-                    if cols.is_empty() {
-                        continue;
-                    }
-                    for row in usize::from(rect.y) & !1..bottom {
-                        self.scratch[row * row_len..][cols.clone()].copy_from_slice(&fb.pixels[row * stride..][cols.clone()]);
+                // A VP9 frame is the whole picture, of which the stream reads
+                // the rectangles that changed, straight out of the
+                // framebuffer and into its planes: the lock is held for the
+                // conversion, which a copy of the same pixels took as long
+                // as, and the frame is coded from the planes once it is let
+                // go.
+                let read: Option<Vec<vp9::Rect>> =
+                    damage.as_ref().map(|rects| rects.iter().map(|r| vp9::Rect { x: r.x, y: r.y, width: r.width, height: r.height }).collect());
+                let encoder = self.vp9.as_mut().expect("made before the lock was kept");
+                encoder.read(&fb.pixels, stride, read.as_deref()).with_context(|| format!("reading a {}x{} framebuffer", fb.width, fb.height))?;
+                if self.config.capture_frames.is_some() {
+                    // The capture is written after the lock is let go, from
+                    // a copy kept for it: the rectangles that changed, and
+                    // the rest of `scratch` is what the frames before left
+                    // there, which is the picture as the client holds it.
+                    // Copied out to whole 2×2 groups, an even row and column
+                    // with the odd ones after them, which a 4:2:0 stream
+                    // reads together.
+                    let row_len = usize::from(fb.width) * 4;
+                    self.scratch.resize(row_len * usize::from(fb.height), 0);
+                    let whole = [Rect::whole(fb.width, fb.height)];
+                    for rect in damage.as_deref().unwrap_or(&whole) {
+                        let right = (usize::from(rect.x) + usize::from(rect.width)).next_multiple_of(2).min(usize::from(fb.width));
+                        let bottom = (usize::from(rect.y) + usize::from(rect.height)).next_multiple_of(2).min(usize::from(fb.height));
+                        let cols = (usize::from(rect.x) & !1) * 4..right * 4;
+                        if cols.is_empty() {
+                            continue;
+                        }
+                        for row in usize::from(rect.y) & !1..bottom {
+                            self.scratch[row * row_len..][cols.clone()].copy_from_slice(&fb.pixels[row * stride..][cols.clone()]);
+                        }
                     }
                 }
-                changed = damage;
+                // The settle's frame codes the whole picture whatever it read.
+                changed = if settling { None } else { read };
             } else {
                 let rects = damage.unwrap_or_else(|| vec![Rect::whole(fb.width, fb.height)]);
                 let rects = if rects.len() > MAX_RECTS { crate::framebuffer::merge(rects, 1) } else { rects };
@@ -1459,30 +1496,22 @@ impl Session {
         Ok(())
     }
 
-    /// The framebuffer in `scratch` as the next frame of the VP9 stream: a
+    /// The picture the VP9 stream read under the lock as its next frame: a
     /// keyframe when the update is a full one or one is owed. `changed` is the
-    /// damage the frame carries, whose rows `scratch` holds, or `None` for a
-    /// whole picture, which `scratch` then is. Returns whether the frame was
-    /// a keyframe, or `None` when the encoder produced no frame: `out` is left
-    /// as it was, and so is the keyframe owed. A settle, which is a whole
-    /// picture, is coded at the configured quality, with the encoder returned
-    /// to the walk's after it — a retune and not a rebuild either way, so no
-    /// keyframe is spent on it.
-    fn encode_vp9(&mut self, full: bool, changed: Option<&[Rect]>) -> anyhow::Result<Option<bool>> {
+    /// damage the frame carries, or `None` for a whole picture, which is what
+    /// a capture is told; the stream knows what it read. Returns whether the
+    /// frame was a keyframe, or `None` when the encoder produced no frame:
+    /// `out` is left as it was, and so is the keyframe owed. A settle, which
+    /// is a whole picture, is coded at the configured quality, with the
+    /// encoder returned to the walk's after it — a retune and not a rebuild
+    /// either way, so no keyframe is spent on it.
+    fn encode_vp9(&mut self, full: bool, changed: Option<&[vp9::Rect]>) -> anyhow::Result<Option<bool>> {
         let settling = self.settle_owed;
         let (width, height) = self.known_size;
-        if self.vp9.as_ref().is_none_or(|encoder| encoder.size() != (width, height)) {
-            let encoder = Vp9Encoder::new(width, height, self.stream.chroma, self.walk.quality())
-                .with_context(|| format!("starting a {} VP9 stream for a {width}x{height} desktop", self.stream.chroma.name()))?;
-            self.vp9 = Some(encoder);
-        }
         let rect_at = self.out.len();
         self.out.extend_from_slice(&msg::rect_header(0, 0, width, height, ENCODING_VP9));
-        let (encoder, pixels, out) = (self.vp9.as_mut().expect("made above"), &self.scratch, &mut self.out);
+        let (encoder, out) = (self.vp9.as_mut().expect("made for the read"), &mut self.out);
         let keyframe = full || self.keyframe_owed;
-        let stride = usize::from(width) * 4;
-        let changed: Option<Vec<vp9::Rect>> =
-            changed.map(|rects| rects.iter().map(|r| vp9::Rect { x: r.x, y: r.y, width: r.width, height: r.height }).collect());
         if let Some(dir) = &self.config.capture_frames {
             let capture = match &mut self.capture {
                 Some(capture) => capture,
@@ -1498,7 +1527,8 @@ impl Session {
             // The frame as the encoder is handed it, the settle's dial
             // included; what it says is what the stream reads.
             let quality = if settling { self.stream.quality } else { encoder.quality() };
-            tokio::task::block_in_place(|| capture.frame((width, height), quality, keyframe, changed.as_deref(), pixels, stride))
+            let stride = usize::from(width) * 4;
+            tokio::task::block_in_place(|| capture.frame((width, height), quality, keyframe, changed, &self.scratch, stride))
                 .context("writing the VP9 capture")?;
         }
         // Tens of milliseconds for a large desktop that changed all over, which
@@ -1507,9 +1537,9 @@ impl Session {
         // and leaves the dial at the walk's.
         let encoded = tokio::task::block_in_place(|| {
             if settling {
-                encoder.settle_rect(pixels, stride, self.stream.quality, keyframe, out)
+                encoder.settle(self.stream.quality, keyframe, out)
             } else {
-                encoder.encode_rect(pixels, stride, changed.as_deref(), keyframe, out)
+                encoder.encode(keyframe, out)
             }
         })
         .with_context(|| format!("encoding a {width}x{height} VP9 frame"));

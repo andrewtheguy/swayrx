@@ -40,7 +40,7 @@ sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.4
 sound-opus = { git = "https://github.com/andrewtheguy/sound-opus", tag = "v0.0.4" }
 # The VP9 encoding's codec: the one place libvpx is spoken to, for this
 # workspace and for the remotex gateway, each pinned to its release tag.
-screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.13" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.14" }
 
 [dev-dependencies]
 # The FLAC encoder's tests read every frame back with symphonia's decoder,
