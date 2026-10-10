@@ -443,9 +443,12 @@ A normal VP9 update is sent when anything is damaged; a non-incremental request,
 a chroma or quality-ceiling change and the settle described above can also owe
 one. The frame is the whole picture, and what did not change costs it
 nearly nothing, in bytes or in time: the session hands the encoder the damage
-since the client's last frame, the encoder converts the rows the damage spans
-and codes the blocks it touches, and every other block is skipped as the client
-holds it — libvpx's active map, a byte per 16×16 block. A 4K frame with one
+since the client's last frame, the encoder converts the rectangles of the damage
+and codes the blocks they touch, and every other block is skipped as the client
+holds it — libvpx's active map, a byte per 16×16 block. The conversion is
+straight out of the framebuffer, under its lock, into the encoder's planes, and
+the frame is coded from those once the lock is let go: the pixels are copied
+nowhere between, unless the frames are captured. A 4K frame with one
 small change took 26 ms to encode whole and 6 to convert, and takes 11 and
 nothing told where it changed; a 1440p one 12 and 2, and takes 5. A keyframe,
 an encoder's first frame, a settle and a client the damage log no longer

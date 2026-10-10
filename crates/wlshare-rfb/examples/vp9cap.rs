@@ -306,7 +306,8 @@ impl Output {
         }
         self.unit.clear();
         let changed = if starting { None } else { frame.changed };
-        let Some(keyframe) = self.stream.encode_bgrx(frame.pixels, usize::from(self.size.0) * 4, changed, starting || frame.keyframe, &mut self.unit)? else {
+        self.stream.read_bgrx(frame.pixels, usize::from(self.size.0) * 4, changed)?;
+        let Some(keyframe) = self.stream.encode(starting || frame.keyframe, &mut self.unit)? else {
             return Ok(());
         };
         let micros = frame.at.as_micros() as u64;
