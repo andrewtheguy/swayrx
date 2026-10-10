@@ -1,8 +1,8 @@
 //! RealVNC's RSA-AES security types (RFB 5 and 129), both ends: an
 //! authenticated, encrypted RFB session over an ordinary 3.8 wire, and the one
 //! standard way a client can tell this server *who* is connecting.
-//! [`authenticate`] is the server's half; the client's, `begin`, is the one
-//! the tests run it against.
+//! [`authenticate`] is the server's half; the client's, [`begin`], is the one
+//! the tests run it against and the one `examples/vp9-sink.rs` logs in with.
 //!
 //! The types are RealVNC's, documented in the community `rfbproto` and spoken
 //! on the open side by TigerVNC, neatvnc and the remotex gateway, whose client
@@ -137,7 +137,6 @@ impl Subtype {
         }
     }
 
-    #[cfg(test)]
     fn of(byte: u8) -> Option<Self> {
         match byte {
             1 => Some(Self::UserPass),
@@ -435,15 +434,13 @@ pub async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 /// The key a client makes for one session and forgets with it.
-#[cfg(test)]
-struct ClientKey {
+pub struct ClientKey {
     private: RsaPrivateKey,
     wire: WireKey,
 }
 
-#[cfg(test)]
 impl ClientKey {
-    fn of_bits(bits: usize) -> Result<Self, rsa::Error> {
+    pub fn of_bits(bits: usize) -> Result<Self, rsa::Error> {
         let private = RsaPrivateKey::new(&mut rand::rng(), bits)?;
         let wire = WireKey::of_public(private.as_public_key());
         Ok(Self { private, wire })
@@ -455,8 +452,7 @@ impl ClientKey {
 /// [`Self::fingerprint`] is the server meant and to answer [`Self::subtype`]
 /// with [`Self::login`]. The decision comes first — the credentials go to
 /// whoever holds that key.
-#[cfg(test)]
-struct Exchange {
+pub struct Exchange {
     session: Session,
     fingerprint: String,
     subtype: Subtype,
@@ -469,8 +465,7 @@ struct Exchange {
 /// decrypt is safe only because the key dies with the connection that refused
 /// it. Answer the same key twice and the refusals become a padding oracle, so
 /// a second exchange has to be a second key.
-#[cfg(test)]
-async fn begin<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+pub async fn begin<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut R,
     writer: &mut W,
     strength: Strength,
@@ -525,23 +520,22 @@ async fn begin<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(Exchange { session: Session { sealer, opener }, fingerprint: server_wire.fingerprint(), subtype })
 }
 
-#[cfg(test)]
 impl Exchange {
     /// RealVNC's display of the server's key, to compare with the one the
     /// server logged at startup or the one seen last time.
-    fn fingerprint(&self) -> &str {
+    pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
 
     /// Which credentials the server wants.
-    fn subtype(&self) -> Subtype {
+    pub fn subtype(&self) -> Subtype {
         self.subtype
     }
 
     /// Answer the server's question. The username goes out empty to a server
     /// that asked for a password alone. What comes back is the transport
     /// SecurityResult and everything after it arrive over.
-    async fn login<W: AsyncWrite + Unpin>(mut self, writer: &mut W, credentials: &Credentials) -> Result<Session, Error> {
+    pub async fn login<W: AsyncWrite + Unpin>(mut self, writer: &mut W, credentials: &Credentials) -> Result<Session, Error> {
         let username = match self.subtype {
             Subtype::UserPass => credentials.username.as_str(),
             Subtype::Password => "",
