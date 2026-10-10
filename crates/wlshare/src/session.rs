@@ -1310,14 +1310,13 @@ impl Session {
         let full;
         // Where a VP9 frame's picture changed, or `None` for a whole one.
         let changed: Option<Vec<vp9::Rect>>;
-        // Whether the VP9 stream was made for this frame, which is then its
-        // first.
-        let mut fresh = false;
         {
             // A VP9 stream is made for the desktop's size with the lock let
             // go, since making one takes a third of a second at 4K and the
             // compositor waits on the lock; the desktop is then looked at
-            // again, which may have changed size meanwhile.
+            // again, which may have changed size meanwhile. A stream made is
+            // owed its keyframe until one is sent, which may not be this time:
+            // the desktop may be unpainted by then.
             let fb = loop {
                 let fb = self.shared.desks[self.desk].framebuffer.lock().unwrap();
                 let (width, height) = (fb.width, fb.height);
@@ -1328,7 +1327,7 @@ impl Session {
                 let encoder = Vp9Encoder::new(width, height, self.stream.chroma, self.walk.quality())
                     .with_context(|| format!("starting a {} VP9 stream for a {width}x{height} desktop", self.stream.chroma.name()))?;
                 self.vp9 = Some(encoder);
-                fresh = true;
+                self.keyframe_owed = true;
             };
             if !fb.painted {
                 drop(fb);
@@ -1345,7 +1344,7 @@ impl Session {
             // which has none to be damage to. A settle is a frame whether or
             // not anything changed, and codes the whole picture, of which it
             // reads what did.
-            let starting = self.use_vp9 && (self.keyframe_owed || fresh);
+            let starting = self.use_vp9 && self.keyframe_owed;
             let settling = self.use_vp9 && self.settle_owed;
             let damage = if full || starting {
                 None
